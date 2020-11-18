@@ -1,0 +1,61 @@
+cabal-version: 2.4
+name: by
+version: 0.1.0
+license: Apache-2.0
+license-file: LICENSE
+extra-source-files: README.md CHANGELOG.md
+author: Renzo Carbonara
+maintainer: renλren.zone
+copyright: Copyright (c) Renzo Carbonara 2020
+category: Bytes
+build-type: Simple
+synopsis: Memory things
+description: Memory things
+homepage: https://github.com/k0001/by
+bug-reports: https://github.com/k0001/bytes/issues
+tested-with: GHC == 8.6.5
+
+common basic
+  default-language: Haskell2010
+  cc-options: -Werror -Wall -Wextra -O3
+  ghc-options: -O2 -Wall -Werror=incomplete-patterns
+               -Wno-partial-type-signatures
+  build-depends:
+    base == 4.*,
+    bytestring,
+  default-extensions:
+    BangPatterns
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DerivingStrategies
+    FlexibleContexts
+    FlexibleInstances
+    GADTs
+    GeneralizedNewtypeDeriving
+    MultiParamTypeClasses
+    PolyKinds
+    RankNTypes
+    ScopedTypeVariables
+    TypeApplications
+    TypeFamilies
+    TypeOperators
+
+library
+  import: basic
+  hs-source-dirs: hs
+  c-sources: c/by.c
+  include-dirs: c/
+  exposed-modules: By
+
+test-suite test
+  import: basic
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends:
+    hedgehog,
+    by,
+    tasty,
+    tasty-hedgehog,
+    tasty-hunit,
