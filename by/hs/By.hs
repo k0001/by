@@ -74,7 +74,7 @@ import qualified Foreign.Concurrent as FC
 import Foreign.ForeignPtr (mallocForeignPtrBytes, touchForeignPtr, 
                            withForeignPtr)
 import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
-import Foreign.Ptr (Ptr, nullPtr, plusPtr)
+import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import qualified Foreign.Storable as Sto
 import GHC.TypeLits
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
@@ -98,20 +98,21 @@ class (GetLength t, KnownNat (Length t)) => KnownLength t where
 --
 -- **WARNING** The “read-only” part is not enforced anywhere. Be careful.
 class GetLength t => Peek t where
-  peek :: t -> (Ptr Word8 -> IO a) -> IO a
+  peek :: t -> (Ptr p -> IO a) -> IO a
 
 -- | Raw byte access for read-write purposes.
 class Peek t => Poke t
 
-poke :: Poke t => t -> (Ptr Word8 -> IO a) -> IO a
+poke :: Poke t => t -> (Ptr p -> IO a) -> IO a
 poke = peek
 {-# INLINE poke #-}
 
 -- | Arbitrary byte length allocation and initialization.
 class (GetLength t, Monoid t) => Alloc t where
-  alloc :: Int -> (Ptr Word8 -> IO a) -> IO (t, a)
+  alloc :: Int -> (Ptr p -> IO a) -> IO (t, a)
 
-allocFreeze :: Alloc t => Int -> (Ptr Word8 -> IO a) -> (t, a)
+-- Like 'alloc'.
+allocFreeze :: Alloc t => Int -> (Ptr p -> IO a) -> (t, a)
 allocFreeze len g = unsafePerformIO (alloc len g)
 {-# NOINLINE allocFreeze #-}
 
@@ -121,9 +122,10 @@ replicate len x = fst $ allocFreeze len (\p -> _memset p len x)
 
 -- | Fixed byte length allocation and initialization.
 class KnownLength t => AllocN t where
-  allocN :: (Ptr Word8 -> IO a) -> IO (t, a)
+  allocN :: (Ptr p -> IO a) -> IO (t, a)
 
-allocFreezeN :: AllocN t => (Ptr Word8 -> IO a) -> (t, a)
+-- | Like 'allocN'.
+allocFreezeN :: AllocN t => (Ptr p -> IO a) -> (t, a)
 allocFreezeN g = unsafePerformIO (allocN g)
 {-# NOINLINE allocFreezeN #-}
 
@@ -170,30 +172,30 @@ instance (Peek a, AllocN a) => ConvertN a a where
   convertN = id
   {-# INLINE convertN #-}
 
-copy :: (Peek a, Alloc b) => a -> (Ptr Word8 -> IO x) -> IO (b, x)
+copy :: (Peek a, Alloc b) => a -> (Ptr p -> IO x) -> IO (b, x)
 copy a g = peek a $ \aP -> do
   alloc (length a) $ \bP -> do
     BI.memcpy bP aP (length a)
-    g bP
+    g (castPtr bP)
 
-copyFreeze :: (Peek a, Alloc b) => a -> (Ptr Word8 -> IO x) -> (b, x)
+copyFreeze :: (Peek a, Alloc b) => a -> (Ptr p -> IO x) -> (b, x)
 copyFreeze a g = unsafePerformIO (copy a g)
 {-# NOINLINE copyFreeze #-}
 
 copyN
   :: (Peek a, AllocN b, KnownLength a, Length a ~ Length b)
   => a
-  -> (Ptr Word8 -> IO x)
+  -> (Ptr p -> IO x)
   -> IO (b, x)
 copyN a g = peek a $ \aP -> do
   allocN $ \bP -> do
     BI.memcpy bP aP (length a)
-    g bP
+    g (castPtr bP)
 
 copyFreezeN
   :: (Peek a, AllocN b, KnownLength a, Length a ~ Length b)
   => a
-  -> (Ptr Word8 -> IO x)
+  -> (Ptr p -> IO x)
   -> (b, x)
 copyFreezeN a g = unsafePerformIO (copyN a g)
 {-# NOINLINE copyFreezeN #-}
@@ -442,7 +444,7 @@ instance Peek B.ByteString where
 instance Alloc B.ByteString where
   alloc len g = do
     fp <- BI.mallocByteString len
-    a <- withForeignPtr fp g
+    a <- withForeignPtr fp (g . castPtr)
     pure (BI.fromForeignPtr fp 0 len, a)
 
 --------------------------------------------------------------------------------
@@ -511,7 +513,7 @@ instance Alloc ByeString where
     fp <- mallocForeignPtrBytes len
     let p = unsafeForeignPtrToPtr fp
     FC.addForeignPtrFinalizer fp $! _memset p len 0x00
-    a <- g p `onException` _memset p len 0x00
+    a <- g (castPtr p) `onException` _memset p len 0x00
     touchForeignPtr fp
     pure (ByeString (BI.fromForeignPtr fp 0 len), a)
 
