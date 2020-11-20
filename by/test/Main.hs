@@ -29,7 +29,35 @@ main =
       tt
 
 tt :: TestTree
-tt = testGroup "Byets" [tt_cmp, tt_toFrom, tt_base16]
+tt = testGroup "By" [tt_cmp, tt_toFrom, tt_base16, tt_sized, tt_unsized]
+
+
+tt_unsized :: TestTree
+tt_unsized = testGroup "Unsized" 
+  [ testCase "pack/0" $ By.pack [] @?= B.pack []
+  , testCase "pack/1" $ By.pack [0] @?= B.pack [0]
+  , testCase "pack/2" $ By.pack [0,1] @?= B.pack [0,1]
+  ]
+
+tt_sized :: TestTree
+tt_sized = testGroup "Sized" 
+  [ testCase "packN/0" $
+      By.packN [] @?= Just (By.unsafeSized @0 "packN/0" (B.pack []))
+  , testCase "packN/1" $ 
+      By.packN [0] @?= Just (By.unsafeSized @1 "packN/1" (B.pack [0]))
+  , testCase "packN/2" $
+      By.packN [0,1] @?= Just (By.unsafeSized @2 "packN/2" (B.pack [0,1]))
+  , testCase "takeN" $ By.takeN s8 @?= s2l
+  , testCase "dropN" $ By.dropN s8 @?= s6r
+  , testCase "splitAtN" $ By.splitAtN s8 @?= (s2l, s6r)
+  ]
+  where
+    s8 :: By.Sized 8 By.ByeString
+    Just s8 = By.packN [0, 1, 2, 3, 4, 5, 6, 7]
+    s2l :: By.Sized 2 By.ByeString
+    Just s2l = By.packN [0, 1]
+    s6r :: By.Sized 6 By.ByeString
+    Just s6r = By.packN [2, 3, 4, 5, 6, 7]
 
 tt_cmp :: TestTree
 tt_cmp =

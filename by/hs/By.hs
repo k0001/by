@@ -17,6 +17,8 @@ module By
   , Convert (..)
   , ConvertN (..)
 
+  , pack
+  , packN
   , copy
   , copyFreeze
   , copyN
@@ -26,6 +28,9 @@ module By
   , padLeftN
   , padRightN
   , appendN
+  , takeN
+  , dropN
+  , splitAtN 
 
   , Sized
   , unSized
@@ -64,7 +69,7 @@ import Control.Monad
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Internal as BI
 import Data.Coerce
-import Data.Foldable (foldl', foldlM)
+import qualified Data.Foldable as F
 import Data.Int
 import Data.Proxy
 import Data.String (IsString (..))
@@ -87,7 +92,7 @@ import Prelude hiding (concat, length, replicate)
 class GetLength t where
   length :: t -> Int
   default length :: KnownLength t => t -> Int
-  length (_ :: t) = fromIntegral (natVal (Proxy :: Proxy (Length t)))
+  length (_ :: t) = fromIntegral (natVal (Proxy @(Length t)))
   {-# INLINE length #-}
 
 -- | Static byte length knownledge.
@@ -131,7 +136,7 @@ allocFreezeN g = unsafePerformIO (allocN g)
 
 replicateN :: forall a. AllocN a => Word8 -> a
 replicateN x =
-  let len = fromIntegral (natVal (Proxy :: Proxy (Length a)))
+  let len = fromIntegral (natVal (Proxy @(Length a)))
    in fst $ allocFreezeN (\p -> _memset p len x)
 {-# INLINE replicateN #-}
 
@@ -220,6 +225,85 @@ appendN a b =
           BI.memcpy cP aP (length a)
           BI.memcpy (plusPtr cP (length a)) bP (length b)
 
+-- | @'splitAtN' a@ splits @a@ into two parts of known lengths. 
+--
+-- The resulting parts are copies independent from @a@.
+splitAtN 
+  :: forall a b c.
+     ( Peek a
+     , KnownLength a
+     , AllocN b
+     , AllocN c
+     , Length a ~ (Length b + Length c)
+     )
+  => a -> (b, c)
+splitAtN a = 
+  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
+      cL :: Int = fromIntegral (natVal (Proxy @(Length c)))
+  in allocFreezeN $ \bP ->
+      fmap fst $ allocN $ \cP ->
+        peek a $ \aP -> do
+          BI.memcpy bP aP bL
+          BI.memcpy cP (plusPtr aP bL) cL
+  
+-- | @'takeN' a@ copies the leading part of @a@ of known length.
+takeN
+  :: forall a b.
+     ( Peek a
+     , KnownLength a
+     , AllocN b
+     , Length b <= Length a)
+  => a -> b
+takeN a = 
+  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
+  in  fst $ allocFreezeN $ \bP ->
+        peek a $ \aP -> do
+          BI.memcpy bP aP bL
+
+-- | @'takeN' a@ copies the trailing part of @a@ of known length.
+dropN
+  :: forall a b.
+     ( Peek a
+     , KnownLength a
+     , AllocN b
+     , Length b <= Length a)
+  => a -> b
+dropN a = 
+  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
+  in  fst $ allocFreezeN $ \bP ->
+        peek a $ \aP -> do
+          BI.memcpy bP (plusPtr aP (length a - bL)) bL
+
+pack
+  :: forall a f.
+     ( Alloc a
+     , Foldable f
+     )
+  => f Word8
+  -> a
+pack ws =
+  fst $ allocFreeze (F.length ws) $ \aP -> 
+    F.foldlM (\off w -> do _memset (plusPtr aP off) 1 w 
+                           pure $! off + 1)
+             0
+             ws
+
+packN 
+  :: forall a f.
+     ( AllocN a
+     , Foldable f
+     )
+  => f Word8
+  -> Maybe a
+packN ws = do
+  let aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
+  guard (F.length ws == aL)
+  pure $ fst $ allocFreezeN $ \aP -> 
+    F.foldlM (\off w -> do _memset (plusPtr aP off) 1 w 
+                           pure $! off + 1)
+             0
+             ws
+
 --------------------------------------------------------------------------------
 
 -- | Interpreted as 'nullPtr'.
@@ -243,7 +327,7 @@ unSized (Sized t) = t
 
 sized :: forall len t. (KnownNat len, GetLength t) => t -> Maybe (Sized len t)
 sized t = do
-  guard (length t == fromIntegral (natVal (Proxy :: Proxy len)))
+  guard (length t == fromIntegral (natVal (Proxy @len)))
   pure (Sized t)
 {-# INLINE sized #-}
 
@@ -258,7 +342,7 @@ unsafeSized p = \t ->
         False -> error (m <> show tL)
   where
     e :: Int
-    e = fromIntegral (natVal (Proxy :: Proxy len))
+    e = fromIntegral (natVal (Proxy @len))
     m :: String
     m = "unsafeSized [" <> p <> "] expected " <> show e <> " bytes, got "
 {-# INLINE unsafeSized #-}
@@ -317,7 +401,7 @@ instance KnownNat len => GetLength (Sized len t)
 
 instance (KnownNat len, Alloc t) => AllocN (Sized len t) where
   allocN g = do
-    (t, a) <- alloc (fromIntegral (natVal (Proxy :: Proxy len))) g
+    (t, a) <- alloc (fromIntegral (natVal (Proxy @len))) g
     pure (Sized t, a)
 
 instance (KnownNat len, Peek t, Alloc t) => Convert (Sized len t) t where
@@ -396,6 +480,7 @@ fromWord64be = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store64be
 
 --------------------------------------------------------------------------------
 
+-- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its left.
 padLeftN
   :: forall a b.
   (Peek a, KnownLength a, AllocN b, Length a <= Length b)
@@ -409,10 +494,11 @@ padLeftN w a = do
         _memset bP pL w
         BI.memcpy (plusPtr bP pL) aP aL
   where
-    aL :: Int = fromIntegral (natVal (Proxy :: Proxy (Length a)))
-    bL :: Int = fromIntegral (natVal (Proxy :: Proxy (Length b)))
+    aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
+    bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
     pL :: Int = bL - aL
 
+-- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its right.
 padRightN
   :: forall a b.
   (Peek a, KnownLength a, AllocN b, Length a <= Length b)
@@ -426,8 +512,8 @@ padRightN w a = do
         BI.memcpy bP aP aL
         _memset (plusPtr bP aL) pL w
   where
-    aL :: Int = fromIntegral (natVal (Proxy :: Proxy (Length a)))
-    bL :: Int = fromIntegral (natVal (Proxy :: Proxy (Length b)))
+    aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
+    bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
     pL :: Int = bL - aL
 
 --------------------------------------------------------------------------------
@@ -496,10 +582,10 @@ instance Monoid ByeString where
 concat :: (Peek a, Alloc b) => [a] -> b
 concat as0 =
   let as1 = filter (\a -> length a > 0) as0
-      bL = _int $ foldl' (+) 0 (fmap (toInteger . length) as1)
+      bL = _int $ F.foldl' (+) 0 (fmap (toInteger . length) as1)
    in fst $
         allocFreeze bL $ \outP -> do
-          foldlM
+          F.foldlM
             (\off a -> peek a $ \aP -> do
                let aL = length a
                BI.memcpy (plusPtr outP off) aP aL
@@ -557,7 +643,7 @@ fromBase16 b16 = do
 fromBase16N :: forall a b. (Peek a, AllocN b) => a -> Maybe b
 fromBase16N b16 = do
   let b16L :: Int = length b16
-      binL :: Int = fromIntegral (natVal (Proxy :: Proxy (Length b)))
+      binL :: Int = fromIntegral (natVal (Proxy @(Length b)))
   guard (binL * 2 == b16L)
   let (bin, ret) = do
         allocFreezeN $ \binP -> do
