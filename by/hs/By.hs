@@ -480,7 +480,8 @@ fromWord64be = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store64be
 
 --------------------------------------------------------------------------------
 
--- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its left.
+-- | @'padLeftN' w a@ extends @a@ with zero or more @w@s on its left.
+-- Returns a copy.
 padLeftN
   :: forall a b.
   (Peek a, KnownLength a, AllocN b, Length a <= Length b)
@@ -499,6 +500,7 @@ padLeftN w a = do
     pL :: Int = bL - aL
 
 -- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its right.
+-- Returns a copy.
 padRightN
   :: forall a b.
   (Peek a, KnownLength a, AllocN b, Length a <= Length b)
