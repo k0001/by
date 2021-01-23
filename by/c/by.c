@@ -1,7 +1,7 @@
 #include "by.h"
 #include <string.h>
 
-// The base16 code is based on code from libsodium, whose license (ISC) 
+// The base16 code is based on code from libsodium, whose license (ISC)
 // is at https://raw.githubusercontent.com/jedisct1/libsodium/master/LICENSE
 
 int by_memcmp_const(uint8_t *a, size_t a_len, uint8_t *b, size_t b_len) {
@@ -85,64 +85,69 @@ int by_from_base16(uint8_t *bin, const uint8_t *base16, size_t base16_len) {
 }
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#  define LE16(x) x 
-#  define LE32(x) x 
-#  define LE64(x) x 
-#  define BE16(x) __builtin_bswap16(x)
-#  define BE32(x) __builtin_bswap32(x)
-#  define BE64(x) __builtin_bswap64(x)
+#  define HTOLE16(x) x
+#  define LE16TOH(x) x
+#  define HTOLE32(x) x
+#  define LE32TOH(x) x
+#  define HTOLE64(x) x
+#  define LE64TOH(x) x
+#  define HTOBE16(x) __builtin_bswap16(x)
+#  define BE16TOH(x) __builtin_bswap16(x)
+#  define HTOBE32(x) __builtin_bswap32(x)
+#  define BE32TOH(x) __builtin_bswap32(x)
+#  define HTOBE64(x) __builtin_bswap64(x)
+#  define BE64TOH(x) __builtin_bswap64(x)
 #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#  define LE16(x) __builtin_bswap16(x)
-#  define LE32(x) __builtin_bswap32(x)
-#  define LE64(x) __builtin_bswap64(x)
-#  define BE16(x) x 
-#  define BE32(x) x 
-#  define BE64(x) x 
+#  define HTOBE16(x) x
+#  define BE16TOH(x) x
+#  define HTOBE32(x) x
+#  define BE32TOH(x) x
+#  define HTOBE64(x) x
+#  define BE64TOH(x) x
+#  define HTOLE16(x) __builtin_bswap16(x)
+#  define LE16TOH(x) __builtin_bswap16(x)
+#  define HTOLE32(x) __builtin_bswap32(x)
+#  define LE32TOH(x) __builtin_bswap32(x)
+#  define HTOLE64(x) __builtin_bswap64(x)
+#  define LE64TOH(x) __builtin_bswap64(x)
 #else
-#  error Unknown __BYTE_ORDER__ 
+#  error Unknown __BYTE_ORDER__
 #endif
 
-inline void by_store64le(uint8_t dst[8], uint64_t x) { 
-  ((uint64_t*)dst)[0] = LE64(x); 
+inline void by_store64le(uint8_t dst[8], uint64_t x) {
+  ((uint64_t*)dst)[0] = HTOLE64(x);
 }
-inline void by_store64be(uint8_t dst[8], uint64_t x) { 
-  ((uint64_t*)dst)[0] = BE64(x); 
+inline void by_store64be(uint8_t dst[8], uint64_t x) {
+  ((uint64_t*)dst)[0] = HTOBE64(x);
 }
-inline void by_store32le(uint8_t dst[4], uint32_t x) { 
-  ((uint64_t*)dst)[0] = LE32(x); 
+inline void by_store32le(uint8_t dst[4], uint32_t x) {
+  ((uint64_t*)dst)[0] = HTOLE32(x);
 }
-inline void by_store32be(uint8_t dst[4], uint32_t x) { 
-  ((uint64_t*)dst)[0] = BE32(x); 
+inline void by_store32be(uint8_t dst[4], uint32_t x) {
+  ((uint64_t*)dst)[0] = HTOBE32(x);
 }
-inline void by_store16le(uint8_t dst[2], uint16_t x) { 
-  ((uint16_t*)dst)[0] = LE16(x); 
+inline void by_store16le(uint8_t dst[2], uint16_t x) {
+  ((uint16_t*)dst)[0] = HTOLE16(x);
 }
-inline void by_store16be(uint8_t dst[2], uint16_t x) { 
-  ((uint16_t*)dst)[0] = BE16(x); 
-}
-
-inline uint64_t by_load64le(const uint8_t in[8]) { 
-  return LE64(((uint64_t*)in)[0]); 
-}
-inline uint64_t by_load64be(const uint8_t in[8]) { 
-  return BE64(((uint64_t*)in)[0]); 
-}
-inline uint32_t by_load32le(const uint8_t in[4]) { 
-  return LE32(((uint32_t*)in)[0]); 
-}
-inline uint32_t by_load32be(const uint8_t in[4]) { 
-  return BE32(((uint32_t*)in)[0]); 
-}
-inline uint16_t by_load16le(const uint8_t in[2]) { 
-  return LE16(((uint16_t*)in)[0]); 
-}
-inline uint16_t by_load16be(const uint8_t in[2]) { 
-  return BE16(((uint16_t*)in)[0]); 
+inline void by_store16be(uint8_t dst[2], uint16_t x) {
+  ((uint16_t*)dst)[0] = HTOBE16(x);
 }
 
-#undef LE16
-#undef LE32
-#undef LE64
-#undef BE16
-#undef BE32
-#undef BE64
+inline uint64_t by_load64le(const uint8_t in[8]) {
+  return LE64TOH(((uint64_t*)in)[0]);
+}
+inline uint64_t by_load64be(const uint8_t in[8]) {
+  return BE64TOH(((uint64_t*)in)[0]);
+}
+inline uint32_t by_load32le(const uint8_t in[4]) {
+  return LE32TOH(((uint32_t*)in)[0]);
+}
+inline uint32_t by_load32be(const uint8_t in[4]) {
+  return BE32TOH(((uint32_t*)in)[0]);
+}
+inline uint16_t by_load16le(const uint8_t in[2]) {
+  return LE16TOH(((uint16_t*)in)[0]);
+}
+inline uint16_t by_load16be(const uint8_t in[2]) {
+  return BE16TOH(((uint16_t*)in)[0]);
+}
