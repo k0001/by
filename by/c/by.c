@@ -22,10 +22,9 @@ int by_memcmp_const(uint8_t *a, size_t a_len, uint8_t *b, size_t b_len) {
 }
 
 int by_to_base16(uint8_t *base16, size_t base16_len, const uint8_t *bin) {
-  if (0 != base16_len % 2)
-    return -1;
+  if (base16_len & 1) return -1;
 
-  size_t bin_len = base16_len / 2;
+  size_t bin_len = base16_len >> 1;
   unsigned int x;
   int b;
   int c;
@@ -43,8 +42,7 @@ int by_to_base16(uint8_t *base16, size_t base16_len, const uint8_t *bin) {
 }
 
 int by_from_base16(uint8_t *bin, const uint8_t *base16, size_t base16_len) {
-  if (0 != base16_len % 2)
-    return -1;
+  if (base16_len & 1) return -1;
 
   // size_t bin_len = base16_len / 2;
   size_t bin_pos = (size_t)0U;
@@ -86,142 +84,65 @@ int by_from_base16(uint8_t *bin, const uint8_t *base16, size_t base16_len) {
   return 0;
 }
 
-void by_store64le(uint8_t out[8], uint64_t x) {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  *(uint64_t *)out = x;
+#  define LE16(x) x 
+#  define LE32(x) x 
+#  define LE64(x) x 
+#  define BE16(x) __builtin_bswap16(x)
+#  define BE32(x) __builtin_bswap32(x)
+#  define BE64(x) __builtin_bswap64(x)
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  define LE16(x) __builtin_bswap16(x)
+#  define LE32(x) __builtin_bswap32(x)
+#  define LE64(x) __builtin_bswap64(x)
+#  define BE16(x) x 
+#  define BE32(x) x 
+#  define BE64(x) x 
 #else
-  out[0] = x;
-  out[1] = x >> 8;
-  out[2] = x >> 16;
-  out[3] = x >> 24;
-  out[4] = x >> 32;
-  out[5] = x >> 40;
-  out[6] = x >> 48;
-  out[7] = x >> 56;
+#  error Unknown __BYTE_ORDER__ 
 #endif
+
+inline void by_store64le(uint8_t dst[8], uint64_t x) { 
+  ((uint64_t*)dst)[0] = LE64(x); 
+}
+inline void by_store64be(uint8_t dst[8], uint64_t x) { 
+  ((uint64_t*)dst)[0] = BE64(x); 
+}
+inline void by_store32le(uint8_t dst[4], uint32_t x) { 
+  ((uint64_t*)dst)[0] = LE32(x); 
+}
+inline void by_store32be(uint8_t dst[4], uint32_t x) { 
+  ((uint64_t*)dst)[0] = BE32(x); 
+}
+inline void by_store16le(uint8_t dst[2], uint16_t x) { 
+  ((uint16_t*)dst)[0] = LE16(x); 
+}
+inline void by_store16be(uint8_t dst[2], uint16_t x) { 
+  ((uint16_t*)dst)[0] = BE16(x); 
 }
 
-void by_store64be(uint8_t out[8], uint64_t x) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  *(uint64_t *)out = x;
-#else
-  out[0] = x >> 56;
-  out[1] = x >> 48;
-  out[2] = x >> 40;
-  out[3] = x >> 32;
-  out[4] = x >> 24;
-  out[5] = x >> 16;
-  out[6] = x >> 8;
-  out[7] = x;
-#endif
+inline uint64_t by_load64le(const uint8_t in[8]) { 
+  return LE64(((uint64_t*)in)[0]); 
+}
+inline uint64_t by_load64be(const uint8_t in[8]) { 
+  return BE64(((uint64_t*)in)[0]); 
+}
+inline uint32_t by_load32le(const uint8_t in[4]) { 
+  return LE32(((uint32_t*)in)[0]); 
+}
+inline uint32_t by_load32be(const uint8_t in[4]) { 
+  return BE32(((uint32_t*)in)[0]); 
+}
+inline uint16_t by_load16le(const uint8_t in[2]) { 
+  return LE16(((uint16_t*)in)[0]); 
+}
+inline uint16_t by_load16be(const uint8_t in[2]) { 
+  return BE16(((uint16_t*)in)[0]); 
 }
 
-void by_store32le(uint8_t out[4], uint32_t x) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  *(uint32_t *)out = x;
-#else
-  out[0] = x;
-  out[1] = x >> 8;
-  out[2] = x >> 16;
-  out[3] = x >> 24;
-#endif
-}
-
-void by_store32be(uint8_t out[4], uint32_t x) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  *(uint32_t *)out = x;
-#else
-  out[0] = x >> 24;
-  out[1] = x >> 16;
-  out[2] = x >> 8;
-  out[3] = x;
-#endif
-}
-
-void by_store16le(uint8_t out[2], uint16_t x) {
-#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
-  *(uint16_t *)out = x;
-#else
-  out[0] = x;
-  out[1] = x >> 8;
-#endif
-}
-
-void by_store16be(uint8_t out[2], uint16_t x) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  *(uint16_t *)out = x;
-#else
-  out[0] = x >> 8;
-  out[1] = x;
-#endif
-}
-
-uint64_t by_load64le(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  return *(uint64_t *)in;
-#else
-  return ((uint64_t)in[0]) |
-         ((uint64_t)in[1] << 8) |
-         ((uint64_t)in[2] << 16) |
-         ((uint64_t)in[3] << 24) |
-         ((uint64_t)in[4] << 32) |
-         ((uint64_t)in[5] << 40) |
-         ((uint64_t)in[6] << 48) |
-         ((uint64_t)in[7] << 56);
-#endif
-}
-
-uint64_t by_load64be(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  return *(uint64_t *)in;
-#else
-  return ((uint64_t)in[0] << 56) |
-         ((uint64_t)in[1] << 48) |
-         ((uint64_t)in[2] << 40) |
-         ((uint64_t)in[3] << 32) |
-         ((uint64_t)in[4] << 24) |
-         ((uint64_t)in[5] << 16) |
-         ((uint64_t)in[6] << 8) |
-         ((uint64_t)in[7]);
-#endif
-}
-
-uint32_t by_load32le(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  return *(uint32_t *)in;
-#else
-  return ((uint32_t)in[0]) |
-         ((uint32_t)in[1] << 8) |
-         ((uint32_t)in[2] << 16) |
-         ((uint32_t)in[3] << 24);
-#endif
-}
-
-uint32_t by_load32be(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  return *(uint32_t *)in;
-#else
-  return ((uint32_t)in[0] << 24) |
-         ((uint32_t)in[1] << 16) |
-         ((uint32_t)in[2] << 8) |
-         ((uint32_t)in[3]);
-#endif
-}
-
-uint16_t by_load16le(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  return *(uint16_t *)in;
-#else
-  return ((uint16_t)in[0]) |
-         ((uint16_t)in[1] << 8);
-#endif
-}
-
-uint16_t by_load16be(uint8_t in[8]) {
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-  return *(uint16_t *)in;
-#else
-  return ((uint16_t)in[0] << 8) |
-         ((uint16_t)in[1]);
-#endif
-}
+#undef LE16
+#undef LE32
+#undef LE64
+#undef BE16
+#undef BE32
+#undef BE64
