@@ -1,4 +1,4 @@
 let pkgs = import ./nix;
 in {
-  ghc865 = pkgs._here.ghc865.by;
+  ghc925 = pkgs._here.ghc925.by;
 }

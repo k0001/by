@@ -1,19 +1,24 @@
 let
   sources = import ./sources.nix;
 
-  haskell-overrides = self: super: { 
-    by = self.callCabal2nix "by" ../by { }; 
+  ghc-overrides = pkgs: self: super:
+    let hs = pkgs.haskell.lib;
+    in {
+      ListLike = hs.dontCheck super.ListLike;
 
-    _shell = super.shellFor {
-      withHoogle = false;
-      packages = p: [ p.by ];
+      by = self.callCabal2nix "by" ../by { };
+
+      _shell = super.shellFor {
+        withHoogle = true;
+        buildInputs = [ pkgs.cabal-install ];
+        packages = p: [ p.by ];
+      };
     };
-  };
 
   pkgs-overlay = self: super: {
     _here = {
-      ghc865 = super.haskell.packages.ghc865.override {
-        overrides = haskell-overrides;
+      ghc925 = super.haskell.packages.ghc925.override {
+        overrides = ghc-overrides self;
       };
     };
   };

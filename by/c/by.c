@@ -9,14 +9,15 @@ int by_memcmp_const(uint8_t *a, size_t a_len, uint8_t *b, size_t b_len) {
 
   size_t min_len = a_len < b_len ? a_len : b_len;
   for (size_t i = 0; i < min_len; i++) {
-    int x = memcmp(a + i, b + i, 1);
-    ret = ret == 0 ? x : ret;
+    int diff = a[i] - b[i];
+    // TODO remove these ifs
+    if (diff < 0) ret = ret == 0 ? -1 : ret;
+    if (diff > 0) ret = ret == 0 ?  1 : ret;
   }
 
-  if (a_len < b_len)
-    ret = ret == 0 ? -1 : ret;
-  if (a_len > b_len)
-    ret = ret == 0 ? 1 : ret;
+  // TODO remove these ifs
+  if (a_len < b_len) ret = ret == 0 ? -1 : ret;
+  if (a_len > b_len) ret = ret == 0 ?  1 : ret;
 
   return ret;
 }
@@ -121,10 +122,10 @@ inline void by_store64be(uint8_t dst[8], uint64_t x) {
   ((uint64_t*)dst)[0] = HTOBE64(x);
 }
 inline void by_store32le(uint8_t dst[4], uint32_t x) {
-  ((uint64_t*)dst)[0] = HTOLE32(x);
+  ((uint32_t*)dst)[0] = HTOLE32(x);
 }
 inline void by_store32be(uint8_t dst[4], uint32_t x) {
-  ((uint64_t*)dst)[0] = HTOBE32(x);
+  ((uint32_t*)dst)[0] = HTOBE32(x);
 }
 inline void by_store16le(uint8_t dst[2], uint16_t x) {
   ((uint16_t*)dst)[0] = HTOLE16(x);

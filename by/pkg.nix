@@ -1,4 +1,4 @@
-{ mkDerivation, base, bytestring, hedgehog, stdenv, tasty
+{ mkDerivation, base, bytestring, hedgehog, lib, tasty
 , tasty-hedgehog, tasty-hunit
 }:
 mkDerivation {
@@ -11,5 +11,5 @@ mkDerivation {
   ];
   homepage = "https://github.com/k0001/by";
   description = "Memory things";
-  license = stdenv.lib.licenses.asl20;
+  license = lib.licenses.asl20;
 }
