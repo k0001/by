@@ -114,7 +114,7 @@ _test_LengthEndsHard :: Dict (LengthEndsHard `I.SubOf` I.TypeEnds CSize)
 
 type LengthIntervalHard = I.Interval LengthEndsHard Int
 
--- | I.Interval endpoints for @'LengthInterval' t@.
+-- | Interval endpoints for @'LengthInterval' t@.
 type LengthEnds (t :: Type) = I.CC (MinLength t) (MaxLength t)
 
 -- | The type of 'length'. Essentially, a positive interval of 'Int' counting
@@ -217,7 +217,6 @@ replicate len x = fst $ unsafeAllocFreeze len (\p -> _memset p x len)
 -- | Fixed byte length allocation and initialization.
 allocN :: forall t p a. (Alloc t, KnownLength t) => (Ptr p -> IO a) -> IO (t, a)
 allocN = alloc (lengthN (Proxy @t))
-{-# INLINE allocN #-}
 
 -- | Like 'allocN', but “pure”. This is safe as long as the
 -- initialization procedure only interacts with @'Length' t@
@@ -235,26 +234,21 @@ unsafeAllocFreezeN g = unsafePerformIO (allocN g)
 replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
 replicateN = replicate (lengthN (Proxy @a))
 
--- | @'copy' a@ copies all of @a@ into a different memory address,
--- with a new type, if it fits.
-{-# NOINLINE copy #-}
+-- | @'copy' a@ copies all of @a@ into a different memory address, if it fits.
 copy
   :: forall a b
   .  ( Peek a
      , Alloc b )
   => a
   -> Maybe b
-copy a = f <$> I.downcast (length a)
-  where
-    {-# NOINLINE f #-}
-    f bL = unsafeDupablePerformIO $
-           peek a $ \aP ->
-           fmap fst $ alloc bL $ \bP ->
-           _memcpy bP aP bL
+copy a = do
+   bL :: LengthInterval b <- I.downcast (length a)
+   pure $ fst $
+          unsafeAllocFreeze bL $ \bP ->
+          peek a $ \aP ->
+          _memcpy bP aP bL
 
--- | @'copy\'' a@ copies all of @a@ into a different memory address,
--- with a new type.
-{-# NOINLINE copyN #-}
+-- | @'copyN' a@ copies all of @a@ into a different memory address.
 copyN
   :: forall a b
   .  ( Peek a
@@ -264,9 +258,8 @@ copyN
   -> b
 copyN a =
   let bL = length a
-  in  unsafeDupablePerformIO $
+  in  fst $ unsafeAllocFreeze (I.upcast bL) $ \bP ->
       peek a $ \aP ->
-      fmap fst $ alloc (I.upcast bL) $ \bP ->
       _memcpy bP aP bL
 
 -- | @'appendN' a b@ concatenates @a@ and @b@, in that order.
@@ -390,7 +383,6 @@ concat as = do
 -- | Interpreted as 'nullPtr'.
 instance Peek () where
   peek _ g = g nullPtr
-  {-# INLINE peek #-}
 
 instance GetLength () where
   type MinLength () = 0
@@ -424,7 +416,6 @@ instance
   alloc l g = do
     (t, a) <- alloc (I.upcast l) g
     pure (Sized t, a)
-  {-# INLINE alloc #-}
 
 unSized :: Sized len t -> t
 unSized = coerce
@@ -453,7 +444,6 @@ unsafeSized
   => t
   -> Sized len t
 unsafeSized = fromMaybe (error "unsafeSized") . sized
-{-# INLINE unsafeSized #-}
 
 withSized
   :: forall t a
@@ -474,7 +464,6 @@ withSizedMinMax
   .  ( GetLength t
      , KnownNat min
      , KnownNat max )
-     -- , I.CC min max `I.SubOf` LengthEnds t )
   => Proxy min
   -> Proxy max
   -> t
