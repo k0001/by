@@ -12,8 +12,8 @@ build-type: Simple
 synopsis: Memory things
 description: Memory things
 homepage: https://github.com/k0001/by
-bug-reports: https://github.com/k0001/bytes/issues
-tested-with: GHC == 8.6.5
+bug-reports: https://github.com/k0001/by/issues
+tested-with: GHC == 9.2.5
 
 common basic
   default-language: Haskell2010
@@ -23,30 +23,20 @@ common basic
   build-depends:
     base == 4.*,
     bytestring,
-  default-extensions:
-    BangPatterns
-    ConstraintKinds
-    DataKinds
-    DefaultSignatures
-    DerivingStrategies
-    FlexibleContexts
-    FlexibleInstances
-    GADTs
-    GeneralizedNewtypeDeriving
-    MultiParamTypeClasses
-    PolyKinds
-    RankNTypes
-    ScopedTypeVariables
-    TypeApplications
-    TypeFamilies
-    TypeOperators
+    constraints,
+    tagged,
+    typenums,
 
 library
   import: basic
   hs-source-dirs: hs
   c-sources: c/by.c
   include-dirs: c/
-  exposed-modules: By
+  exposed-modules:
+    By
+    -- This belongs in a different library:
+    Interval
+  build-depends: ghc-prim
 
 test-suite test
   import: basic

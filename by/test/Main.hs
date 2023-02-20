@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+
 {-# OPTIONS_GHC -Wno-unused-top-binds -Wno-incomplete-uni-patterns #-}
 
 module Main (main) where
@@ -9,15 +18,18 @@ import qualified Data.ByteString.Char8 as B8
 import Data.Maybe
 import Data.Proxy
 import Data.Word
-import GHC.TypeLits
-import Hedgehog (forAll, property, (===))
+import Data.Type.Ord
+-- import GHC.TypeLits
+import GHC.TypeNats
+import Hedgehog (MonadGen, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Test.Tasty (TestTree, testGroup)
 import qualified Test.Tasty as Tasty
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=), (@=?))
 import Test.Tasty.Hedgehog (HedgehogTestLimit (..), testProperty)
 import qualified Test.Tasty.Runners as Tasty
+import Unsafe.Coerce (unsafeCoerce)
 
 --------------------------------------------------------------------------------
 
@@ -34,45 +46,94 @@ tt = testGroup "By" [tt_cmp, tt_toFrom, tt_base16, tt_sized, tt_unsized]
 
 tt_unsized :: TestTree
 tt_unsized = testGroup "Unsized"
-  [ testCase "pack/0" $ By.pack [] @?= B.pack []
-  , testCase "pack/1" $ By.pack [0] @?= B.pack [0]
-  , testCase "pack/2" $ By.pack [0,1] @?= B.pack [0,1]
+  [ testCase "pack/0" $ By.pack [] @?= Just (B.pack [])
+  , testCase "pack/1" $ By.pack [0xAB] @?= Just (B.pack [0xAB])
+  , testCase "pack/2" $ By.pack [0xAB, 0xCD] @?= Just (B.pack [0xAB, 0xCD])
   ]
 
 tt_sized :: TestTree
 tt_sized = testGroup "Sized"
-  [ testCase "packN/0" $
-      By.packN [] @?= Just (By.unsafeSized @0 "packN/0" (B.pack []))
-  , testCase "packN/1" $
-      By.packN [0] @?= Just (By.unsafeSized @1 "packN/1" (B.pack [0]))
-  , testCase "packN/2" $
-      By.packN [0,1] @?= Just (By.unsafeSized @2 "packN/2" (B.pack [0,1]))
+  [ testCase "pack/0" $
+      let Just x =   By.pack @B.ByteString              []
+      in  Just x @=? fmap By.unSized (By.pack @(By.Sized 0 B.ByteString) [])
+  , testCase "pack/1" $
+      let Just x =   By.pack @B.ByteString              [0xAB]
+      in  Just x @=? fmap By.unSized (By.pack @(By.Sized 1 B.ByteString) [0xAB])
+  , testCase "pack/2" $
+      let Just x =   By.pack @B.ByteString              [0xAB, 0xCD]
+      in  Just x @=? fmap By.unSized (By.pack @(By.Sized 2 B.ByteString) [0xAB, 0xCD])
   , testCase "takeN" $ By.takeN s8 @?= s2l
   , testCase "dropN" $ By.dropN s8 @?= s6r
   , testCase "splitAtN" $ By.splitAtN s8 @?= (s2l, s6r)
   ]
   where
-    s8 :: By.Sized 8 By.ByeString
-    Just s8 = By.packN [0, 1, 2, 3, 4, 5, 6, 7]
-    s2l :: By.Sized 2 By.ByeString
-    Just s2l = By.packN [0, 1]
-    s6r :: By.Sized 6 By.ByeString
-    Just s6r = By.packN [2, 3, 4, 5, 6, 7]
+    s8 :: By.Sized 8 B.ByteString
+    Just s8 = By.pack [0, 1, 2, 3, 4, 5, 6, 7]
+    s2l :: By.Sized 2 B.ByteString
+    Just s2l = By.pack [0, 1]
+    s6r :: By.Sized 6 B.ByteString
+    Just s6r = By.pack [2, 3, 4, 5, 6, 7]
 
 tt_cmp :: TestTree
 tt_cmp =
   testGroup
     "cmp"
-    [ testProperty "Ord" $
-        property $ do
-          x :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
-          y :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
-          compare x y === compare (By.ByeString x) (By.ByeString y)
-    , testProperty "Eq" $
-        property $ do
-          x :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
-          y :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
-          (x == y) === (By.ByeString x == By.ByeString y)
+    [ testGroup
+        "copyN"
+        [ testProperty "Ord" $
+            property $ do
+              x :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
+              y :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
+              compare x y === compare (By.copyN x) (By.copyN y :: B.ByteString)
+
+        , testProperty "Eq" $
+            property $ do
+              x :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
+              y :: B.ByteString <- forAll $ Gen.bytes (Range.linear 0 20)
+              (x == y) === (By.copyN x == (By.copyN y :: B.ByteString))
+        ]
+    , testGroup
+        "Sized len Byets"
+        [ testProperty "Ord" $
+            property $ do
+              a0   <- forAll $ genSizedByteString @0
+              a1   <- forAll $ genSizedByteString @1
+              a2   <- forAll $ genSizedByteString @2
+              a8   <- forAll $ genSizedByteString @8
+              a100 <- forAll $ genSizedByteString @8
+
+              b0   <- forAll $ genSizedByteString @0
+              b1   <- forAll $ genSizedByteString @1
+              b2   <- forAll $ genSizedByteString @2
+              b8   <- forAll $ genSizedByteString @8
+              b100 <- forAll $ genSizedByteString @8
+
+              compare a0   b0   === compare (By.unSized a0)   (By.unSized b0)
+              compare a1   b1   === compare (By.unSized a1)   (By.unSized b1)
+              compare a2   b2   === compare (By.unSized a2)   (By.unSized b2)
+              compare a8   b8   === compare (By.unSized a8)   (By.unSized b8)
+              compare a100 b100 === compare (By.unSized a100) (By.unSized b100)
+
+        , testProperty "Eq" $
+            property $ do
+              a0   <- forAll $ genSizedByteString @0
+              a1   <- forAll $ genSizedByteString @1
+              a2   <- forAll $ genSizedByteString @2
+              a8   <- forAll $ genSizedByteString @8
+              a100 <- forAll $ genSizedByteString @8
+
+              b0   <- forAll $ genSizedByteString @0
+              b1   <- forAll $ genSizedByteString @1
+              b2   <- forAll $ genSizedByteString @2
+              b8   <- forAll $ genSizedByteString @8
+              b100 <- forAll $ genSizedByteString @8
+
+              (==) a0   b0   === (==) (By.unSized a0)   (By.unSized b0)
+              (==) a1   b1   === (==) (By.unSized a1)   (By.unSized b1)
+              (==) a2   b2   === (==) (By.unSized a2)   (By.unSized b2)
+              (==) a8   b8   === (==) (By.unSized a8)   (By.unSized b8)
+              (==) a100 b100 === (==) (By.unSized a100) (By.unSized b100)
+        ]
     ]
 
 tt_base16 :: TestTree
@@ -82,89 +143,129 @@ tt_base16 =
     [ testProperty "roundtrip" $
         property $ do
           x <- forAll $ Gen.bytes (Range.linear 0 500)
-          Just x === By.fromBase16 (By.toBase16 x :: By.ByeString)
+          Just x === (By.fromBase16 =<< (By.toBase16 x :: Maybe B.ByteString))
+
+    , testProperty "toBase16 == toBase16N" $
+        property $ do
+          a0 <- forAll $ genSizedByteString @0
+          a1 <- forAll $ genSizedByteString @1
+          a2 <- forAll $ genSizedByteString @2
+          a3 <- forAll $ genSizedByteString @3
+
+          By.toBase16 a0 === Just (By.unSized (By.toBase16N a0 :: By.Sized 0 B.ByteString))
+          By.toBase16 a1 === Just (By.unSized (By.toBase16N a1 :: By.Sized 2 B.ByteString))
+          By.toBase16 a2 === Just (By.unSized (By.toBase16N a2 :: By.Sized 4 B.ByteString))
+          By.toBase16 a3 === Just (By.unSized (By.toBase16N a3 :: By.Sized 6 B.ByteString))
+
     , testProperty "fromBase16: valid" $
         property $ do
           binLength <- forAll $ Gen.int (Range.linear 0 500)
           b16S <- forAll $ replicateM (binLength * 2) $ Gen.element alphabetBase16S
           let b16 = B8.pack b16S :: B.ByteString
-          True === isJust (By.fromBase16 b16 :: Maybe By.ByeString)
-    , testProperty "fromBase16/N: random" $
-        property $ do
-          xb16 <- forAll $ Gen.bytes (Range.constant 0 4)
-          let xb16L :: Int = B.length xb16
-              binL :: Int = xb16L `div` 2
-              okBytes :: Bool = B.all (`elem` B.unpack alphabetBase16) xb16
-              okLength :: Bool = even xb16L
-              ok :: Bool = okLength && okBytes
-              yBin :: Maybe By.ByeString = By.fromBase16 xb16
-              yBinN :: Maybe By.ByeString = do
-                SomeNat (_ :: Proxy binL) <- someNatVal (fromIntegral binL)
-                sb <- By.fromBase16N xb16 :: Maybe (By.Sized binL By.ByeString)
-                pure (By.unSized sb)
-          yBin === yBinN
-          ok === isJust yBin
+          True === isJust (By.fromBase16 b16 :: Maybe B.ByteString)
     ]
   where
     alphabetBase16S = "0123456789abcdefABCDEF" :: String
-    alphabetBase16 = B8.pack alphabetBase16S :: B.ByteString
 
 tt_toFrom :: TestTree
 tt_toFrom =
   testGroup
     "toFrom"
-    [ testCase "toWord8" $ By.toWord8 b8 @?= w8
-    , testCase "fromWord8" $ By.fromWord8 w8 @?= b8
-    , testProperty "Word8" $
-        property $ do
-          x <- forAll $ Gen.word8 Range.constantBounded
-          x === By.toWord8 (By.fromWord8 x `asTypeOf` b8)
-    , testCase "toWord16le" $ By.toWord16le le16 @?= w16
-    , testCase "fromWord16le" $ By.fromWord16le w16 @?= le16
-    , testProperty "Word16le" $
-        property $ do
-          x <- forAll $ Gen.word16 Range.constantBounded
-          x === By.toWord16le (By.fromWord16le x `asTypeOf` le16)
-    , testCase "toWord16be" $ By.toWord16be be16 @?= w16
-    , testCase "fromWord16be" $ By.fromWord16be w16 @?= be16
-    , testProperty "Word16be" $
-        property $ do
-          x <- forAll $ Gen.word16 Range.constantBounded
-          x === By.toWord16be (By.fromWord16be x `asTypeOf` be16)
-    , testCase "toWord32le" $ By.toWord32le le32 @?= w32
-    , testCase "fromWord32le" $ By.fromWord32le w32 @?= le32
-    , testProperty "Word32le" $
-        property $ do
-          x <- forAll $ Gen.word32 Range.constantBounded
-          x === By.toWord32le (By.fromWord32le x `asTypeOf` le32)
-    , testCase "toWord32be" $ By.toWord32be be32 @?= w32
-    , testCase "fromWord32be" $ By.fromWord32be w32 @?= be32
-    , testProperty "Word32be" $
-        property $ do
-          x <- forAll $ Gen.word32 Range.constantBounded
-          x === By.toWord32be (By.fromWord32be x `asTypeOf` be32)
-    , testCase "toWord64le" $ By.toWord64le le64 @?= w64
-    , testCase "fromWord64le" $ By.fromWord64le w64 @?= le64
-    , testProperty "Word64le" $
-        property $ do
-          x <- forAll $ Gen.word64 Range.constantBounded
-          x === By.toWord64le (By.fromWord64le x `asTypeOf` le64)
-    , testCase "toWord64be" $ By.toWord64be be64 @?= w64
-    , testCase "fromWord64be" $ By.fromWord64be w64 @?= be64
-    , testProperty "Word64be" $
-        property $ do
-          x <- forAll $ Gen.word64 Range.constantBounded
-          x === By.toWord64be (By.fromWord64be x `asTypeOf` be64)
+    [ testGroup
+      "Word8"
+      [ testCase "decodeLE" $ By.decodeLE b8 @?= w8
+      , testCase "decodeBE" $ By.decodeBE b8 @?= w8
+      ]
+    , testGroup
+      "Word16"
+      [ testCase "decodeLE" $ By.decodeLE le16 @?= w16
+      , testCase "decodeBE" $ By.decodeBE be16 @?= w16
+      ]
+    , testGroup
+      "Word32"
+      [ testCase "decodeLE" $ By.decodeLE le32 @?= w32
+      , testCase "decodeBE" $ By.decodeBE be32 @?= w32
+      ]
+    , testGroup
+      "Word64"
+      [ testCase "decodeLE" $ By.decodeLE le64 @?= w64
+      , testCase "decodeBE" $ By.decodeBE be64 @?= w64
+      , testCase "encodeLE" $ By.encodeLE w64 @?= le64
+      , testCase "encodeBE" $ By.encodeBE w64 @?= be64
+      ]
+--    , testCase "fromWord8" $ By.fromWord8 w8 @?= b8
+--    , testProperty "Word8" $
+--        property $ do
+--          x <- forAll $ Gen.word8 Range.constantBounded
+--          x === By.toWord8 (By.fromWord8 x `asTypeOf` b8)
+--    , testCase "toWord16le" $ By.toWord16le le16 @?= w16
+--    , testCase "fromWord16le" $ By.fromWord16le w16 @?= le16
+--    , testProperty "Word16le" $
+--        property $ do
+--          x <- forAll $ Gen.word16 Range.constantBounded
+--          x === By.toWord16le (By.fromWord16le x `asTypeOf` le16)
+--    , testCase "toWord16be" $ By.toWord16be be16 @?= w16
+--    , testCase "fromWord16be" $ By.fromWord16be w16 @?= be16
+--    , testProperty "Word16be" $
+--        property $ do
+--          x <- forAll $ Gen.word16 Range.constantBounded
+--          x === By.toWord16be (By.fromWord16be x `asTypeOf` be16)
+--    , testCase "toWord32le" $ By.toWord32le le32 @?= w32
+--    , testCase "fromWord32le" $ By.fromWord32le w32 @?= le32
+--    , testProperty "Word32le" $
+--        property $ do
+--          x <- forAll $ Gen.word32 Range.constantBounded
+--          x === By.toWord32le (By.fromWord32le x `asTypeOf` le32)
+--    , testCase "toWord32be" $ By.toWord32be be32 @?= w32
+--    , testCase "fromWord32be" $ By.fromWord32be w32 @?= be32
+--    , testProperty "Word32be" $
+--        property $ do
+--          x <- forAll $ Gen.word32 Range.constantBounded
+--          x === By.toWord32be (By.fromWord32be x `asTypeOf` be32)
+--    , testCase "toWord64le" $ By.toWord64le le64 @?= w64
+--    , testCase "fromWord64le" $ By.fromWord64le w64 @?= le64
+--    , testProperty "Word64le" $
+--        property $ do
+--          x <- forAll $ Gen.word64 Range.constantBounded
+--          x === By.toWord64le (By.fromWord64le x `asTypeOf` le64)
+--    , testCase "toWord64be" $ By.toWord64be be64 @?= w64
+--    , testCase "fromWord64be" $ By.fromWord64be w64 @?= be64
+--    , testProperty "Word64be" $
+--        property $ do
+--          x <- forAll $ Gen.word64 Range.constantBounded
+--          x === By.toWord64be (By.fromWord64be x `asTypeOf` be64)
     ]
   where
     w8 = 0x01 :: Word8
-    Just b8 = By.fromBase16N @B.ByteString @(By.Sized 1 B.ByteString) (B8.pack "01")
+    Just b8 = By.sized @1 (B8.pack "\x01")
     w16 = 0x0123 :: Word16
-    Just be16 = By.fromBase16N @B.ByteString @(By.Sized 2 B.ByteString) (B8.pack "0123")
-    Just le16 = By.fromBase16N @B.ByteString @(By.Sized 2 B.ByteString) (B8.pack "2301")
+    Just be16 = By.sized @2 (B8.pack "\x01\x23")
+    Just le16 = By.sized @2 (B8.pack "\x23\x01")
     w32 = 0x01234567 :: Word32
-    Just be32 = By.fromBase16N @B.ByteString @(By.Sized 4 B.ByteString) (B8.pack "01234567")
-    Just le32 = By.fromBase16N @B.ByteString @(By.Sized 4 B.ByteString) (B8.pack "67452301")
+    Just be32 = By.sized @4 (B8.pack "\x01\x23\x45\x67")
+    Just le32 = By.sized @4 (B8.pack "\x67\x45\x23\x01")
     w64 = 0x0123456789abcdef :: Word64
-    Just be64 = By.fromBase16N @B.ByteString @(By.Sized 8 B.ByteString) (B8.pack "0123456789abcdef")
-    Just le64 = By.fromBase16N @B.ByteString @(By.Sized 8 B.ByteString) (B8.pack "efcdab8967452301")
+    Just be64 = By.sized @8 (B8.pack "\x01\x23\x45\x67\x89\xAB\xCD\xEF")
+    Just le64 = By.sized @8 (B8.pack "\xEF\xCD\xAB\x89\x67\x45\x23\x01")
+
+genSizedByteString
+  :: forall len m
+  .  (MonadGen m, By.Alloc (By.Sized len B.ByteString))
+  => m (By.Sized len B.ByteString)
+genSizedByteString = do
+  x <- Gen.bytes $ Range.singleton $ fromIntegral (natVal (Proxy @len))
+  maybe (error "genSizedByteString: unexpected") pure (By.sized x)
+
+proveLE
+  :: (KnownNat l, KnownNat r)
+  => Proxy l
+  -> Proxy r
+  -> Maybe (Dict (l <= r))
+proveLE l r = case cmpNat l r of
+  EQI -> Just $ unsafeCoerce (Dict @(0 <= 0))
+  LTI -> Just $ unsafeCoerce (Dict @(0 <= 1))
+  GTI -> Nothing
+
+-- | Like the one from the 'constraints' library.
+data Dict c where
+  Dict :: c => Dict c

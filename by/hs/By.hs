@@ -1,7 +1,35 @@
-module By
-  ( GetLength (..)
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
-  , KnownLength (..)
+#include <MachDeps.h>
+
+module By {--}
+  ( GetLength (..)
+  , LengthInterval
+  , LengthEnds
+
+  , LengthIntervalHard
+  , LengthEndsHard
+
+  , KnownLength(..)
+  , lengthN
 
   , Peek (..)
 
@@ -9,20 +37,16 @@ module By
   , poke
 
   , Alloc (..)
-  , allocFreeze
+  , unsafeAllocFreeze
 
-  , AllocN (..)
-  , allocFreezeN
-
-  , Convert (..)
-  , ConvertN (..)
+  , allocN
+  , unsafeAllocFreezeN
 
   , pack
-  , packN
+  , unpack
+  , shows
   , copy
-  , copyFreeze
   , copyN
-  , copyFreezeN
   , replicate
   , replicateN
   , padLeftN
@@ -30,78 +54,131 @@ module By
   , appendN
   , takeN
   , dropN
-  , splitAtN 
+  , splitAtN
+  , concat
 
   , Sized
   , unSized
   , sized
   , unsafeSized
   , withSized
-  , withSizedMax
   , withSizedMinMax
 
   , toBase16
+  , toBase16N
   , fromBase16
-  , fromBase16N
 
-  , ByeString (..)
+  , Endian(..)
+  , Size
 
-  , fromWord8
-  , fromWord16le
-  , fromWord16be
-  , fromWord32le
-  , fromWord32be
-  , fromWord64le
-  , fromWord64be
-
-  , toWord8
-  , toWord16le
-  , toWord16be
-  , toWord32le
-  , toWord32be
-  , toWord64le
-  , toWord64be
-  )
+  -- * Misc
+  , proveLE
+  ) --}
 where
 
-import Control.Exception (onException)
 import Control.Monad
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Internal as BI
+import Data.ByteString qualified as B
+import Data.ByteString.Internal qualified as BI
+import Data.Char (chr)
 import Data.Coerce
-import qualified Data.Foldable as F
+import Data.Constraint
+import Data.Foldable qualified as F
 import Data.Int
+import Data.Kind
+import Data.Maybe (fromMaybe)
 import Data.Proxy
-import Data.String (IsString (..))
+import Data.Tagged
+import Data.Type.Ord (OrderingI(..))
 import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
-import qualified Foreign.Concurrent as FC
-import Foreign.ForeignPtr (mallocForeignPtrBytes, touchForeignPtr, 
-                           withForeignPtr)
-import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
-import qualified Foreign.Storable as Sto
-import GHC.TypeLits
+import Foreign.Storable qualified as Sto
+import GHC.TypeNats hiding (type (<=))
+import Prelude hiding (concat, length, replicate, shows)
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude hiding (concat, length, replicate)
+
+import Interval (type (<=))
+import Interval qualified as I
 
 --------------------------------------------------------------------------------
 
--- | Runtime byte length discovery.
-class GetLength t where
-  length :: t -> Int
-  default length :: KnownLength t => t -> Int
-  length (_ :: t) = fromIntegral (natVal (Proxy @(Length t)))
-  {-# INLINE length #-}
+-- | Hard maximum length interval ends supported by this library.
+-- We want 'length' to stay within 'Int' bounds since most Haskell libraries
+-- use 'Int' instead of 'CSize' for counting length.
+type LengthEndsHard = I.CC 0 (I.MaxBound Int)
 
--- | Static byte length knownledge.
-class (GetLength t, KnownNat (Length t)) => KnownLength t where
-  type Length t :: Nat
+_test_LengthEndsHard =  Dict
+_test_LengthEndsHard :: Dict (LengthEndsHard `I.SubOf` I.TypeEnds CSize)
+
+type LengthIntervalHard = I.Interval LengthEndsHard Int
+
+-- | I.Interval endpoints for @'LengthInterval' t@.
+type LengthEnds (t :: Type) = I.CC (MinLength t) (MaxLength t)
+
+-- | The type of 'length'. Essentially, a positive interval of 'Int' counting
+-- the number of bytes of user data that fit in @t@, excluding any extra bytes
+-- that may be required by its structure that are not intended for user data.
+type LengthInterval (t :: Type) = I.Interval (LengthEnds t) Int
+
+-- | Superclass 'Constraint's for @'GetLength' t@.
+
+-- TODO: some of the constraints here are redundant. Simplify if it annoys
+-- downstream usage.
+type GetLength' (t :: Type) =
+  ( LengthEnds t `I.SubOf` LengthEndsHard
+  , LengthEnds t `I.Contains` MinLength t
+  , LengthEnds t `I.Contains` MaxLength t
+
+  , I.KnownInterval (LengthEnds t) Int
+  , I.KnownNum (MinLength t) Int
+  , I.KnownNum (MaxLength t) Int
+
+  , I.KnownNum (MinLength t) CSize
+  , I.KnownNum (MaxLength t) CSize
+  , I.KnownInterval (LengthEnds t) CSize
+
+  , I.KnownNum (MinLength t) Natural
+  , I.KnownNum (MaxLength t) Natural
+  , I.KnownInterval (LengthEnds t) Natural
+
+  , KnownNat (MinLength t)
+  , KnownNat (MaxLength t)
+  ) :: Constraint
+
+-- | Runtime byte length discovery.
+class GetLength' t => GetLength t where
+  type MinLength (t :: Type) :: Natural
+  type MaxLength (t :: Type) :: Natural
+  length :: t -> LengthInterval t
+  default length :: KnownLength t => t -> LengthInterval t
+  length (_ :: t) = lengthN (Proxy @t)
+
+-- | Statically known byte length.
+class
+  ( GetLength t
+  , Length t ~ MinLength t
+  , Length t ~ MaxLength t
+  ) => KnownLength (t :: Type) where
+  -- | Known fixed number of bytes of user data that fit in @t@.
+  type Length t :: Natural
+  type Length t = MinLength t
+
+-- | Unique instance.
+instance
+  ( GetLength t
+  , Length t ~ MinLength t
+  , Length t ~ MaxLength t
+  ) => KnownLength (t :: Type) where
+
+-- | Get statically known byte length.
+lengthN :: forall t. KnownLength t => Proxy t -> LengthInterval t
+lengthN _ = I.intervalVal (Proxy @(Length t))
 
 -- | Raw byte access for read-only purposes.
 --
--- **WARNING** The “read-only” part is not enforced anywhere. Be careful.
+-- __WARNING__ The “read-only” part is not enforced anywhere. Be careful.
 class GetLength t => Peek t where
   peek :: t -> (Ptr p -> IO a) -> IO a
 
@@ -113,196 +190,200 @@ poke = peek
 {-# INLINE poke #-}
 
 -- | Arbitrary byte length allocation and initialization.
-class (GetLength t, Monoid t) => Alloc t where
-  alloc :: Int -> (Ptr p -> IO a) -> IO (t, a)
+class GetLength t => Alloc t where
+  alloc :: LengthInterval t
+        -> (Ptr p -> IO a)
+        -- ^ Iitialization procedure for 'length'
+        -- bytes starting at the given 'Ptr'.
+        -> IO (t, a)
 
--- Like 'alloc'.
-allocFreeze :: Alloc t => Int -> (Ptr p -> IO a) -> (t, a)
-allocFreeze len g = unsafePerformIO (alloc len g)
-{-# NOINLINE allocFreeze #-}
+-- | Like 'alloc', but “pure”. This is safe as long as the
+-- initialization procedure only interacts with the 'length'
+-- bytes starting at the given 'Ptr'.
+unsafeAllocFreeze
+  :: Alloc t
+  => LengthInterval t -- ^ 'length'.
+  -> (Ptr p -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> (t, a)
+unsafeAllocFreeze len g = unsafePerformIO (alloc len g)
+{-# NOINLINE unsafeAllocFreeze #-}
 
-replicate :: forall a. Alloc a => Int -> Word8 -> a
-replicate len x = fst $ allocFreeze len (\p -> _memset p len x)
-{-# INLINE replicate #-}
+-- | @'replicate' n x@ repeats @n@ times the byte @x@.
+replicate :: Alloc a => LengthInterval a -> Word8 -> a
+replicate len x = fst $ unsafeAllocFreeze len (\p -> _memset p x len)
 
 -- | Fixed byte length allocation and initialization.
-class KnownLength t => AllocN t where
-  allocN :: (Ptr p -> IO a) -> IO (t, a)
+allocN :: forall t p a. (Alloc t, KnownLength t) => (Ptr p -> IO a) -> IO (t, a)
+allocN = alloc (lengthN (Proxy @t))
+{-# INLINE allocN #-}
 
--- | Like 'allocN'.
-allocFreezeN :: AllocN t => (Ptr p -> IO a) -> (t, a)
-allocFreezeN g = unsafePerformIO (allocN g)
-{-# NOINLINE allocFreezeN #-}
+-- | Like 'allocN', but “pure”. This is safe as long as the
+-- initialization procedure only interacts with @'Length' t@
+-- bytes starting at the given 'Ptr'.
+unsafeAllocFreezeN
+  :: (Alloc t, KnownLength t)
+  => (Ptr p -> IO a)
+  -- ^ Initialization procedure for @'Length' t@
+  -- bytes starting at the given 'Ptr'.
+  -> (t, a)
+unsafeAllocFreezeN g = unsafePerformIO (allocN g)
+{-# NOINLINE unsafeAllocFreezeN #-}
 
-replicateN :: forall a. AllocN a => Word8 -> a
-replicateN x =
-  let len = fromIntegral (natVal (Proxy @(Length a)))
-   in fst $ allocFreezeN (\p -> _memset p len x)
-{-# INLINE replicateN #-}
+-- | @'replicate' x@ repeats @'Length' a@ times the byte @x@.
+replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
+replicateN = replicate (lengthN (Proxy @a))
 
-class (Peek a, Alloc b) => Convert a b where
-  -- | Convert @a@ to @b@. The default implementation uses 'coerce' if possible.
-  convert :: a -> b
-  default convert :: Coercible a b => a -> b
-  convert = coerce
-  {-# INLINE convert #-}
+-- | @'copy' a@ copies all of @a@ into a different memory address,
+-- with a new type, if it fits.
+{-# NOINLINE copy #-}
+copy
+  :: forall a b
+  .  ( Peek a
+     , Alloc b )
+  => a
+  -> Maybe b
+copy a = f <$> I.downcast (length a)
+  where
+    {-# NOINLINE f #-}
+    f bL = unsafeDupablePerformIO $
+           peek a $ \aP ->
+           fmap fst $ alloc bL $ \bP ->
+           _memcpy bP aP bL
 
--- | Fallback instance that copies @a@. 
--- Override with something more efficient if desired.
-instance {-# OVERLAPPABLE #-} (Peek a, Alloc b) => Convert a b where
-  convert a = fst $ copyFreeze a $ const (pure ())
-  {-# INLINE convert #-}
-
--- | Identity.
-instance (Peek a, Alloc a) => Convert a a where
-  convert = id
-  {-# INLINE convert #-}
-
-class (Peek a, AllocN b, Length a ~ Length b) => ConvertN a b where
-  -- | Convert @a@ to @b@. The default implementation uses 'coerce' if possible.
-  convertN :: a -> b
-  default convertN :: Coercible a b => a -> b
-  convertN = coerce
-  {-# INLINE convertN #-}
-
--- | Fallback instance that copies @a@. 
--- Override with something more efficient if desired.
-instance {-# OVERLAPPABLE #-} (Peek a, AllocN b, KnownLength a, Length a ~ Length b) 
-  => ConvertN a b where
-  convertN a = fst $ copyFreezeN a $ const (pure ())
-  {-# INLINE convertN #-}
-
--- | Identity.
-instance (Peek a, AllocN a) => ConvertN a a where
-  convertN = id
-  {-# INLINE convertN #-}
-
-copy :: (Peek a, Alloc b) => a -> (Ptr p -> IO x) -> IO (b, x)
-copy a g = peek a $ \aP -> do
-  alloc (length a) $ \bP -> do
-    BI.memcpy bP aP (length a)
-    g (castPtr bP)
-
-copyFreeze :: (Peek a, Alloc b) => a -> (Ptr p -> IO x) -> (b, x)
-copyFreeze a g = unsafePerformIO (copy a g)
-{-# NOINLINE copyFreeze #-}
-
+-- | @'copy\'' a@ copies all of @a@ into a different memory address,
+-- with a new type.
+{-# NOINLINE copyN #-}
 copyN
-  :: (Peek a, AllocN b, KnownLength a, Length a ~ Length b)
+  :: forall a b
+  .  ( Peek a
+     , Alloc b
+     , LengthEnds a `I.SubOf` LengthEnds b )
   => a
-  -> (Ptr p -> IO x)
-  -> IO (b, x)
-copyN a g = peek a $ \aP -> do
-  allocN $ \bP -> do
-    BI.memcpy bP aP (length a)
-    g (castPtr bP)
-
-copyFreezeN
-  :: (Peek a, AllocN b, KnownLength a, Length a ~ Length b)
-  => a
-  -> (Ptr p -> IO x)
-  -> (b, x)
-copyFreezeN a g = unsafePerformIO (copyN a g)
-{-# NOINLINE copyFreezeN #-}
+  -> b
+copyN a =
+  let bL = length a
+  in  unsafeDupablePerformIO $
+      peek a $ \aP ->
+      fmap fst $ alloc (I.upcast bL) $ \bP ->
+      _memcpy bP aP bL
 
 -- | @'appendN' a b@ concatenates @a@ and @b@, in that order.
 appendN
-  :: ( Peek a
+  :: forall a b c
+  .  ( Peek a
      , Peek b
+     , Alloc c
      , KnownLength a
      , KnownLength b
-     , AllocN c
-     , Length c ~ (Length a + Length b)
-     )
+     , KnownLength c
+     , Length c ~ (Length a + Length b) )
   => a
   -> b
   -> c
-appendN a b =
-  fst $
-    allocFreezeN $ \cP ->
-      peek a $ \aP ->
-        peek b $ \bP -> do
-          BI.memcpy cP aP (length a)
-          BI.memcpy (plusPtr cP (length a)) bP (length b)
+appendN =
+  let aL = lengthN (Proxy @a)
+      bL = lengthN (Proxy @b)
+  in \a b -> fst $ unsafeAllocFreezeN $ \cP ->
+                   peek a $ \aP ->
+                   peek b $ \bP -> do
+                     _memcpy cP aP aL
+                     _memcpy (_plusPtr cP aL) bP bL
 
--- | @'splitAtN' a@ splits @a@ into two parts of known lengths. 
+-- | @'splitAtN' a@ splits @a@ into two parts of known lengths.
 --
 -- The resulting parts are copies independent from @a@.
-splitAtN 
-  :: forall a b c.
-     ( Peek a
-     , KnownLength a
-     , AllocN b
-     , AllocN c
-     , Length a ~ (Length b + Length c)
-     )
-  => a -> (b, c)
-splitAtN a = 
-  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-      cL :: Int = fromIntegral (natVal (Proxy @(Length c)))
-  in allocFreezeN $ \bP ->
-      fmap fst $ allocN $ \cP ->
-        peek a $ \aP -> do
-          BI.memcpy bP aP bL
-          BI.memcpy cP (plusPtr aP bL) cL
-  
+splitAtN
+  :: forall a b c
+  .  ( Peek a
+     , Alloc b
+     , Alloc c
+     , KnownLength b
+     , KnownLength c
+     , Length a ~ (Length b + Length c) )
+  => a
+  -> (b, c)
+splitAtN =
+  let bL = lengthN (Proxy @b)
+      cL = lengthN (Proxy @c)
+  in \a -> unsafeAllocFreezeN $ \bP ->
+           fmap fst $ allocN $ \cP ->
+           peek a $ \aP -> do
+             _memcpy bP aP bL
+             _memcpy cP (_plusPtr aP bL) cL
+
 -- | @'takeN' a@ copies the leading part of @a@ of known length.
 takeN
   :: forall a b.
      ( Peek a
-     , KnownLength a
-     , AllocN b
-     , Length b <= Length a)
-  => a -> b
-takeN a = 
-  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-  in  fst $ allocFreezeN $ \bP ->
-        peek a $ \aP -> do
-          BI.memcpy bP aP bL
+     , Alloc b
+     , KnownLength b
+     , Length b <= Length a )
+  => a
+  -> b
+takeN =
+  let bL = lengthN (Proxy @b)
+  in  \a -> fst $ unsafeAllocFreezeN $ \bP ->
+                  peek a $ \aP ->
+                  _memcpy bP aP bL
 
 -- | @'takeN' a@ copies the trailing part of @a@ of known length.
 dropN
   :: forall a b.
      ( Peek a
+     , Alloc b
      , KnownLength a
-     , AllocN b
-     , Length b <= Length a)
-  => a -> b
-dropN a = 
-  let bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-  in  fst $ allocFreezeN $ \bP ->
-        peek a $ \aP -> do
-          BI.memcpy bP (plusPtr aP (length a - bL)) bL
+     , KnownLength b
+     , Length b <= Length a )
+  => a
+  -> b
+dropN = \a ->
+    fst $ unsafeAllocFreezeN $ \bP ->
+          peek a $ \aP ->
+          _memcpy bP (plusPtr aP pL') bL
+  where
+    aL = lengthN (Proxy @a)
+    bL = lengthN (Proxy @b)
+    pL' = I.unInterval aL - I.unInterval bL
 
-pack
-  :: forall a f.
-     ( Alloc a
-     , Foldable f
-     )
-  => f Word8
-  -> a
-pack ws =
-  fst $ allocFreeze (F.length ws) $ \aP -> 
-    F.foldlM (\off w -> do _memset (plusPtr aP off) 1 w 
-                           pure $! off + 1)
-             0
-             ws
+-- | 'Nothing' if the result doesn't fit in @a@.
+pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
+pack ws = do
+  aL <- I.intervalFrom (F.length ws)
+  pure $ fst $ unsafeAllocFreeze aL $ \aP ->
+         F.foldlM (\off w -> do c_memset (plusPtr aP off) w 1
+                                pure $! off + 1)
+                  0
+                  ws
 
-packN 
-  :: forall a f.
-     ( AllocN a
-     , Foldable f
-     )
-  => f Word8
-  -> Maybe a
-packN ws = do
-  let aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
-  guard (F.length ws == aL)
-  pure $ fst $ allocFreezeN $ \aP -> 
-    F.foldlM (\off w -> do _memset (plusPtr aP off) 1 w 
-                           pure $! off + 1)
-             0
-             ws
+{-# NOINLINE unpack #-}
+unpack :: Peek a => a -> [Word8]
+unpack a = unsafeDupablePerformIO $ peek a (f (I.unInterval' (length a)))
+  where
+    f :: Int -> Ptr Word8 -> IO [Word8]
+    f 0 !_ = pure []
+    f n  p = do !x <- Sto.peek p
+                !xs <- f (n - 1) (plusPtr p 1)
+                pure (x : xs)
+
+shows :: Peek a => a -> ShowS
+shows = showString . fmap (chr . fromIntegral) . unpack
+
+-- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
+concat :: forall a b. (Peek a, Alloc b) => [a] -> Maybe b
+concat as = do
+  bL <- do
+    -- We add lengths as 'Natural' to avoid overflowing 'Int' while adding.
+    x <- I.intervalFrom $ F.sum $ fmap (I.unInterval' . length) as
+    I.downcast (x :: I.Interval LengthEndsHard Natural)
+  Just $ fst $ unsafeAllocFreeze bL $ \outP ->
+         F.foldlM (\off a -> peek a $ \aP -> do
+                      let aL = length a
+                      _memcpy (plusPtr outP off) aP aL
+                      pure $! off + I.unInterval' aL)
+         0
+         as
 
 --------------------------------------------------------------------------------
 
@@ -311,218 +392,354 @@ instance Peek () where
   peek _ g = g nullPtr
   {-# INLINE peek #-}
 
-instance GetLength ()
-
-instance KnownLength () where
-  type Length () = 0
+instance GetLength () where
+  type MinLength () = 0
+  type MaxLength () = 0
+  length () = I.intervalVal (Proxy @0)
 
 --------------------------------------------------------------------------------
 
-newtype Sized (len :: Nat) t = Sized t
-  deriving newtype (Eq, Ord, Show, Peek, Poke)
+newtype Sized (len :: Natural) t = Sized t
+  deriving newtype (Show)
+
+deriving newtype instance {-# OVERLAPPABLE #-} Eq t => Eq (Sized len t)
+deriving newtype instance {-# OVERLAPPABLE #-} Ord t => Ord (Sized len t)
+
+deriving newtype instance (GetLength (Sized len t), Peek t)
+  => Peek (Sized len t)
+
+deriving newtype instance (Peek (Sized len t), Poke t)
+  => Poke (Sized len t)
+
+instance GetLength' (Sized len t) => GetLength (Sized len t) where
+  type MinLength (Sized len t) = len
+  type MaxLength (Sized len t) = len
+
+instance
+  ( Alloc t
+  , MinLength t <= len
+  , len <= MaxLength t
+  , KnownLength (Sized len t)
+  ) => Alloc (Sized len t) where
+  alloc l g = do
+    (t, a) <- alloc (I.upcast l) g
+    pure (Sized t, a)
+  {-# INLINE alloc #-}
 
 unSized :: Sized len t -> t
-unSized (Sized t) = t
+unSized = coerce
 {-# INLINE unSized #-}
 
-sized :: forall len t. (KnownNat len, GetLength t) => t -> Maybe (Sized len t)
-sized t = do
-  guard (length t == fromIntegral (natVal (Proxy @len)))
+-- | Wrap the @t@ in a 'Sized' if it has the correct length.
+sized
+  :: forall len t
+  .  (KnownNat len, GetLength t)
+  => t
+  -> Maybe (Sized len t)
+sized = \t -> do
+  let pLen = Proxy @len
+  Dict <- proveLE (Proxy @(MinLength t)) pLen
+  Dict <- proveLE pLen (Proxy @(MaxLength t))
+  Dict <- proveLE pLen (Proxy @(I.MaxBound Int))
+  tL :: LengthInterval t <- I.downcast (length t)
+  guard (tL == I.intervalVal (Proxy @len))
   pure (Sized t)
-{-# INLINE sized #-}
 
--- | Construct a 'Sized' if the given @t@ has the correct length, otherwise
--- fail with 'error'. The given 'String' will be included in the error messsge.
-unsafeSized 
-  :: forall len t. (KnownNat len, GetLength t) => String -> t -> Sized len t
-unsafeSized p = \t ->
-  let tL = length t
-   in case e == tL of
-        True -> Sized t
-        False -> error (m <> show tL)
-  where
-    e :: Int
-    e = fromIntegral (natVal (Proxy @len))
-    m :: String
-    m = "unsafeSized [" <> p <> "] expected " <> show e <> " bytes, got "
+-- | Wrap the @t@ in a 'Sized' if it has the correct length,
+-- otherwise fail with 'error'.
+unsafeSized
+  :: forall len t
+  .  (KnownNat len, GetLength t)
+  => t
+  -> Sized len t
+unsafeSized = fromMaybe (error "unsafeSized") . sized
 {-# INLINE unsafeSized #-}
 
 withSized
-  :: forall t a.
-  GetLength t
+  :: forall t a
+  .  GetLength t
   => t
-  -> (forall len. KnownNat len => Sized len t -> a)
+  -> (forall len
+        .  KnownLength (Sized len t)
+        => Sized len t
+        -> a)
   -> a
-withSized t g = case someNatVal (toInteger (length t)) of
-  Just (SomeNat (_ :: Proxy len)) -> g (Sized t :: Sized len t)
-  Nothing -> undefined -- impossible, always non-negative
-{-# INLINE withSized #-}
+withSized t g = fromMaybe (error "withSized") $
+  withSizedMinMax (Proxy @(MinLength t)) (Proxy @(MaxLength t)) t g
 
-withSizedMax
-  :: forall max t a.
-  (GetLength t, KnownNat max)
-  => Proxy max
-  -> t
-  -> ( forall len.
-       (KnownNat len, 0 <= len, len <= max)
-       => Sized len t
-       -> a
-     )
-  -> Maybe a
-withSizedMax = withSizedMinMax (Proxy @0)
-{-# INLINE withSizedMax #-}
-
+-- | Wrap the @t@ in a 'Sized' of some unknown length
+-- within @min@ and @max@.
 withSizedMinMax
-  :: forall min max t a.
-  (GetLength t, KnownNat min, KnownNat max)
+  :: forall min max t a
+  .  ( GetLength t
+     , KnownNat min
+     , KnownNat max )
+     -- , I.CC min max `I.SubOf` LengthEnds t )
   => Proxy min
   -> Proxy max
   -> t
-  -> ( forall len.
-       (KnownNat len, min <= len, len <= max)
+  -> ( forall len
+       .  ( KnownLength (Sized len t)
+          , min <= len
+          , len <= max )
        => Sized len t
-       -> a
-     )
+       -> a )
   -> Maybe a
 withSizedMinMax pMin pMax t g = do
-  let len = toInteger (length t)
-  guard (natVal pMin <= len && len <= natVal pMax)
-  SomeNat (_ :: Proxy len) <- someNatVal len
-  -- 'len' is between 'min' and 'max', we create a fake Dict to please 'g'.
-  case unsafeCoerce (Dict :: Dict (1 <= 2, 3 <= 4)) of
-    (Dict :: Dict (min <= len, len <= max)) ->
-      Just (g (Sized t :: Sized len t))
-{-# INLINE withSizedMinMax #-}
+  SomeNat (pLen :: Proxy len) <- pure $ someNatVal $ I.unInterval' (length t)
+  Dict <- proveLE pMin pLen
+  Dict <- proveLE pLen pMax
+  Dict <- proveLE (Proxy @0) pLen
+  Dict <- proveLE pLen (Proxy @(I.MaxBound Int))
+  Dict <- proveLE pLen (Proxy @(I.MaxBound CSize))
+  pure $ g (Sized t :: Sized len t)
 
-instance KnownNat len => KnownLength (Sized len t) where
-  type Length (Sized len t) = len
-
-instance KnownNat len => GetLength (Sized len t)
-
-instance (KnownNat len, Alloc t) => AllocN (Sized len t) where
-  allocN g = do
-    (t, a) <- alloc (fromIntegral (natVal (Proxy @len))) g
-    pure (Sized t, a)
-
-instance (KnownNat len, Peek t, Alloc t) => Convert (Sized len t) t where
-  convert = unSized
-  {-# INLINE convert #-}
-
-instance {-# OVERLAPPABLE #-} (KnownNat len, Convert a b) => Convert (Sized len a) b where
-  convert = convert . unSized
-  {-# INLINE convert #-}
-
-instance (KnownNat len, Convert a b) => ConvertN (Sized len a) (Sized len b) where
-  convertN = Sized . convert . unSized
-  {-# INLINE convertN #-}
-
---------------------------------------------------------------------------------
--- Conversion to integer types
-
-{-# NOINLINE toWord8 #-}
-toWord8 :: (Peek a, KnownLength a, Length a ~ 1) => a -> Word8
-toWord8 x = unsafeDupablePerformIO $ peek x Sto.peek
-
-{-# NOINLINE toWord16le #-}
-toWord16le :: (Peek a, KnownLength a, Length a ~ 2) => a -> Word16
-toWord16le x = unsafeDupablePerformIO $ peek x (pure . c_by_load16le)
-
-{-# NOINLINE toWord16be #-}
-toWord16be :: (Peek a, KnownLength a, Length a ~ 2) => a -> Word16
-toWord16be x = unsafeDupablePerformIO $ peek x (pure . c_by_load16be)
-
-{-# NOINLINE toWord32le #-}
-toWord32le :: (Peek a, KnownLength a, Length a ~ 4) => a -> Word32
-toWord32le x = unsafeDupablePerformIO $ peek x (pure . c_by_load32le)
-
-{-# NOINLINE toWord32be #-}
-toWord32be :: (Peek a, KnownLength a, Length a ~ 4) => a -> Word32
-toWord32be x = unsafeDupablePerformIO $ peek x (pure . c_by_load32be)
-
-{-# NOINLINE toWord64le #-}
-toWord64le :: (Peek a, KnownLength a, Length a ~ 8) => a -> Word64
-toWord64le x = unsafeDupablePerformIO $ peek x (pure . c_by_load64le)
-
-{-# NOINLINE toWord64be #-}
-toWord64be :: (Peek a, KnownLength a, Length a ~ 8) => a -> Word64
-toWord64be x = unsafeDupablePerformIO $ peek x (pure . c_by_load64be)
-
---------------------------------------------------------------------------------
--- Conversion from integer types
-
-{-# NOINLINE fromWord8 #-}
-fromWord8 :: (AllocN a, Length a ~ 1) => Word8 -> a
-fromWord8 = unsafeDupablePerformIO . fmap fst . allocN . flip Sto.poke
-
-{-# NOINLINE fromWord16le #-}
-fromWord16le :: (AllocN a, Length a ~ 2) => Word16 -> a
-fromWord16le = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store16le
-
-{-# NOINLINE fromWord16be #-}
-fromWord16be :: (AllocN a, Length a ~ 2) => Word16 -> a
-fromWord16be = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store16be
-
-{-# NOINLINE fromWord32le #-}
-fromWord32le :: (AllocN a, Length a ~ 4) => Word32 -> a
-fromWord32le = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store32le
-
-{-# NOINLINE fromWord32be #-}
-fromWord32be :: (AllocN a, Length a ~ 4) => Word32 -> a
-fromWord32be = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store32be
-
-{-# NOINLINE fromWord64le #-}
-fromWord64le :: (AllocN a, Length a ~ 8) => Word64 -> a
-fromWord64le = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store64le
-
-{-# NOINLINE fromWord64be #-}
-fromWord64be :: (AllocN a, Length a ~ 8) => Word64 -> a
-fromWord64be = unsafeDupablePerformIO . fmap fst . allocN . flip c_by_store64be
+proveLE
+  :: (KnownNat l, KnownNat r)
+  => Proxy l
+  -> Proxy r
+  -> Maybe (Dict (l <= r))
+proveLE l r = case cmpNat l r of
+  EQI -> Just $ unsafeCoerce (Dict @(0 <= 0))
+  LTI -> Just $ unsafeCoerce (Dict @(0 <= 1))
+  GTI -> Nothing
 
 --------------------------------------------------------------------------------
 
+type family Size (a :: Type) :: Natural
+
+type instance Size Word8  = 1
+type instance Size Word16 = 2
+type instance Size Word32 = 4
+type instance Size Word64 = 8
+type instance Size Int8   = 1
+type instance Size Int16  = 2
+type instance Size Int32  = 4
+type instance Size Int64  = 8
+type instance Size CSize = Size Word
+
+#if WORD_SIZE_IN_BITS == 64
+type instance Size Int  = Size Int64
+type instance Size Word = Size Word64
+#elif WORD_SIZE_IN_BITS == 32
+type instance Size Int  = Size Int32
+type instance Size Word = Size Word32
+#else
+#  error "Unexpected WORD_SIZE_IN_BYTES"
+#endif
+
+--------------------------------------------------------------------------------
+
+-- | Conversion between host byte encoding and Little-Endian or
+-- Big-Endian byte encoding.
+class I.KnownNum (Size a) Int => Endian a where
+  {-# MINIMAL hToLE, hToBE, leToH, beToH #-}
+  -- | From host encoding to Little-Endian encoding.
+  hToLE :: a -> Tagged "LE" a
+  -- | From host encoding to Big-Endian encoding.
+  hToBE :: a -> Tagged "BE" a
+  -- | From Little-Endian encoding to host encoding.
+  leToH :: Tagged "LE" a -> a
+  -- | From Big-Endian encoding to host encoding.
+  beToH :: Tagged "BE" a -> a
+
+  -- | Writes @a@ in @h@ using the host encoding.
+  encodeH :: forall h. (Alloc h, LengthEnds h `I.Contains` Size a) => a -> h
+  -- | Default implementation in case there is a @'Sto.Storable' a@ instance.
+  default encodeH
+    :: forall h
+    .  ( Alloc h
+       , LengthEnds h `I.Contains` Size a
+       , Sto.Storable a )
+    => a -> h
+  encodeH = fst
+          . unsafeAllocFreeze (I.intervalVal (Proxy @(Size a)))
+          . flip Sto.poke
+
+  -- | Writes @a@ in @le@ using Litle-Endian encoding.
+  encodeLE :: forall le. (Alloc le, LengthEnds le `I.Contains` Size a) => a -> le
+  encodeLE = encodeH . unTagged . hToLE
+
+  -- | Writes @a@ in @be@ using Big-Endian encoding.
+  encodeBE
+    :: forall be. (Alloc be, LengthEnds be `I.Contains` Size a) => a -> be
+  encodeBE = encodeH . unTagged . hToBE
+
+  -- | Reads @a@ from @h@ using the host encoding.
+  decodeH :: forall h. (Peek h, Size a ~ Length h) => h -> a
+  -- | Default implementation in case there is a @'Sto.Storable' a@ instance.
+  default decodeH
+    :: forall h. (Peek h, Size a ~ Length h, Sto.Storable a) => h -> a
+  decodeH h = unsafeDupablePerformIO $ peek h Sto.peek
+  {-# NOINLINE decodeH #-}
+
+  -- | Reads @a@ from @le@ using Little-Endian encoding.
+  decodeLE :: forall le. (Peek le, Size a ~ Length le) => le -> a
+  decodeLE = leToH . Tagged . decodeH
+
+  -- | Reads @a@ from @be@ using Big-Endian encoding.
+  decodeBE :: forall be. (Peek be, Size a ~ Length be) => be -> a
+  decodeBE = beToH . Tagged . decodeH
+
+instance Endian Word8 where
+  hToLE = coerce
+  hToBE = coerce
+  leToH = coerce
+  beToH = coerce
+
+instance Endian Word16 where
+  hToLE = coerce htole16
+  hToBE = coerce htobe16
+  leToH = coerce le16toh
+  beToH = coerce be16toh
+
+instance Endian Word32 where
+  hToLE = coerce htole32
+  hToBE = coerce htobe32
+  leToH = coerce le32toh
+  beToH = coerce be32toh
+
+instance Endian Word64 where
+  hToLE = coerce htole64
+  hToBE = coerce htobe64
+  leToH = coerce le64toh
+  beToH = coerce be64toh
+
+instance Endian Int where
+  hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
+  hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
+  leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+  beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+
+instance Endian Int8 where
+  hToLE = coerce
+  hToBE = coerce
+  leToH = coerce
+  beToH = coerce
+
+instance Endian Int16 where
+  hToLE = Tagged . fromIntegral . htole16 . fromIntegral
+  hToBE = Tagged . fromIntegral . htobe16 . fromIntegral
+  leToH = fromIntegral . le16toh . fromIntegral . unTagged
+  beToH = fromIntegral . be16toh . fromIntegral . unTagged
+
+instance Endian Int32 where
+  hToLE = Tagged . fromIntegral . htole32 . fromIntegral
+  hToBE = Tagged . fromIntegral . htobe32 . fromIntegral
+  leToH = fromIntegral . le32toh . fromIntegral . unTagged
+  beToH = fromIntegral . be32toh . fromIntegral . unTagged
+
+instance Endian Int64 where
+  hToLE = Tagged . fromIntegral . htole64 . fromIntegral
+  hToBE = Tagged . fromIntegral . htobe64 . fromIntegral
+  leToH = fromIntegral . le64toh . fromIntegral . unTagged
+  beToH = fromIntegral . be64toh . fromIntegral . unTagged
+
+instance Endian CSize where
+  hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
+  hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
+  leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+  beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+
+instance Endian Word where
+#if WORD_SIZE_IN_BITS == 64
+  hToLE = fmap (fromIntegral @Word64) . hToLE . fromIntegral
+  hToBE = fmap (fromIntegral @Word64) . hToBE . fromIntegral
+  leToH = fromIntegral @Word64 . beToH . fromIntegral . unTagged
+  beToH = fromIntegral @Word64 . beToH . fromIntegral . unTagged
+#elif WORD_SIZE_IN_BITS == 32
+  hToLE = fmap (fromIntegral @Word32) . hToLE . fromIntegral
+  hToBE = fmap (fromIntegral @Word32) . hToBE . fromIntegral
+  leToH = fromIntegral @Word32 . beToH . fromIntegral . unTagged
+  beToH = fromIntegral @Word32 . beToH . fromIntegral . unTagged
+#endif
+
+--------------------------------------------------------------------------------
+
+htole16, htobe16, le16toh, be16toh :: Word16 -> Word16
+htole32, htobe32, le32toh, be32toh :: Word32 -> Word32
+htole64, htobe64, le64toh, be64toh :: Word64 -> Word64
+#ifdef WORDS_BIGENDIAN
+htole16 = byteSwap16
+le16toh = byteSwap16
+htole32 = byteSwap32
+le32toh = byteSwap32
+htole64 = byteSwap64
+le64toh = byteSwap64
+htobe16 = id
+be16toh = id
+htobe32 = id
+be32toh = id
+htobe64 = id
+be64toh = id
+#else
+htobe16 = byteSwap16
+be16toh = byteSwap16
+htobe32 = byteSwap32
+be32toh = byteSwap32
+htobe64 = byteSwap64
+be64toh = byteSwap64
+htole16 = id
+le16toh = id
+htole32 = id
+le32toh = id
+htole64 = id
+le64toh = id
+#endif
+
+--------------------------------------------------------------------------------
 -- | @'padLeftN' w a@ extends @a@ with zero or more @w@s on its left.
 -- Returns a copy.
 padLeftN
-  :: forall a b.
-  (Peek a, KnownLength a, AllocN b, Length a <= Length b)
+  :: forall a b
+  .  ( Peek a
+     , Alloc b
+     , KnownLength b
+     , MaxLength a <= Length b )
   => Word8
   -> a
   -> b
-padLeftN w a = do
+padLeftN w a =
   fst $
-    allocFreezeN $ \bP ->
-      peek a $ \aP -> do
-        _memset bP pL w
-        BI.memcpy (plusPtr bP pL) aP aL
-  where
-    aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
-    bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-    pL :: Int = bL - aL
+  unsafeAllocFreezeN $ \bP ->
+  peek a $ \aP -> do
+    let bLi :: Int   = I.unInterval (lengthN (Proxy @b))
+        aLi :: Int   = I.unInterval (length a)
+        dLi :: Int   = bLi - aLi -- no overflow because (aLs <= bLi)
+        dLs :: CSize = fromIntegral dLi -- safe because LengthEndsHard
+    c_memset bP w dLs
+    c_memcpy (plusPtr bP dLi) aP (I.unInterval' (length a))
 
 -- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its right.
 -- Returns a copy.
 padRightN
-  :: forall a b.
-  (Peek a, KnownLength a, AllocN b, Length a <= Length b)
+  :: forall a b
+  .  ( Peek a
+     , Alloc b
+     , KnownLength b
+     , MaxLength a <= Length b )
   => Word8
   -> a
   -> b
-padRightN w a = do
+padRightN w a =
   fst $
-    allocFreezeN $ \bP ->
-      peek a $ \aP -> do
-        BI.memcpy bP aP aL
-        _memset (plusPtr bP aL) pL w
-  where
-    aL :: Int = fromIntegral (natVal (Proxy @(Length a)))
-    bL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-    pL :: Int = bL - aL
+  unsafeAllocFreezeN $ \bP ->
+  peek a $ \aP -> do
+    let bLi :: Int   = I.unInterval (lengthN (Proxy @b))
+        aLi :: Int   = I.unInterval (length a)
+        dLi :: Int   = bLi - aLi -- no overflow because (aLs <= bLi)
+        dLs :: CSize = fromIntegral dLi -- safe because LengthEndsHard
+    void $ c_memcpy bP aP (I.unInterval' (length a))
+    c_memset (plusPtr bP aLi) w dLs
 
 --------------------------------------------------------------------------------
 
 instance GetLength B.ByteString where
-  length = B.length
-  {-# INLINE length #-}
+  type MinLength B.ByteString = 0
+  type MaxLength B.ByteString = I.MaxBound Int
+  length = fromMaybe (error "By.lenght: unsupported ByteString length")
+         . I.intervalFrom
+         . B.length
 
 instance Peek B.ByteString where
   peek bs g = do
@@ -531,167 +748,95 @@ instance Peek B.ByteString where
 
 instance Alloc B.ByteString where
   alloc len g = do
-    fp <- BI.mallocByteString len
+    let len' = I.unInterval len
+    fp <- BI.mallocByteString len'
     a <- withForeignPtr fp (g . castPtr)
-    pure (BI.fromForeignPtr fp 0 len, a)
+    pure (BI.fromForeignPtr fp 0 len', a)
 
 --------------------------------------------------------------------------------
 
--- | A 'ByteString' that zeroes its memory during garbage collection, and
--- implements constant-time 'Eq' and 'Ord'.
---
--- It's safe to discard the 'ByeString' wrapper and use the 'ByeString'
--- directly. The memory zeroing is tied to the 'ByteString', not
--- the 'ByeString'.
---
--- Additionally, 'Eq' and 'Ord' are constant time.
-newtype ByeString = ByeString B.ByteString
-  deriving newtype (Show, GetLength, Peek, IsString)
+-- | Like 'c_memcpy', except it takes an 'Interval' so as to avoid having
+-- to litter the calling code with 'I.unInterval'.
+_memcpy
+  :: I.Upcast LengthEndsHard CSize e a
+  => Ptr Word8 -- ^ dst
+  -> Ptr Word8 -- ^ src
+  -> I.Interval e a
+  -> IO ()
+_memcpy dst src len =
+  void $ c_memcpy dst src
+       $ I.unInterval (I.upcast len :: I.Interval LengthEndsHard CSize)
 
--- | Constant time.
-instance Eq ByeString where
-  (==) = constEq
-  {-# INLINE (==) #-}
+-- | Like 'c_memset', except it takes an 'Interval' so as to avoid having
+-- to litter the calling code with 'I.unInterval'.
+_memset
+  :: I.Upcast LengthEndsHard CSize e a
+  => Ptr Word8 -- ^ dst
+  -> Word8     -- ^ value
+  -> I.Interval e a
+  -> IO ()
+_memset dst value len =
+  c_memset dst value $
+    I.unInterval (I.upcast len :: I.Interval LengthEndsHard CSize)
 
--- | Constant time.
-instance Ord ByeString where
-  compare = constCompare
-  {-# INLINE compare #-}
-
-instance Convert B.ByteString ByeString where
-  convert = ByeString
-  {-# INLINE convert #-}
-
-instance Convert ByeString B.ByteString where
-  convert (ByeString x) = x
-  {-# INLINE convert #-}
-
-instance Semigroup ByeString where
-  a <> b
-    | length a == 0 = b
-    | length b == 0 = a
-    | otherwise = mconcat [a, b]
-  {-# INLINE (<>) #-}
-
-instance Monoid ByeString where
-  mempty = ByeString B.empty
-  {-# INLINE mempty #-}
-  mconcat [] = mempty
-  mconcat [x] = x
-  mconcat xs = concat xs
-  {-# INLINE mconcat #-}
-
-concat :: (Peek a, Alloc b) => [a] -> b
-concat as0 =
-  let as1 = filter (\a -> length a > 0) as0
-      bL = _int $ F.foldl' (+) 0 (fmap (toInteger . length) as1)
-   in fst $
-        allocFreeze bL $ \outP -> do
-          F.foldlM
-            (\off a -> peek a $ \aP -> do
-               let aL = length a
-               BI.memcpy (plusPtr outP off) aP aL
-               pure $! off + aL)
-            0
-            as1
-
-instance Alloc ByeString where
-  alloc 0 g = (,) mempty <$> g nullPtr
-  alloc len g = do
-    fp <- mallocForeignPtrBytes len
-    let p = unsafeForeignPtrToPtr fp
-    FC.addForeignPtrFinalizer fp $! _memset p len 0x00
-    a <- g (castPtr p) `onException` _memset p len 0x00
-    touchForeignPtr fp
-    pure (ByeString (BI.fromForeignPtr fp 0 len), a)
-
-_memset :: Ptr Word8 -> Int -> Word8 -> IO ()
-_memset !p !len !x = case len of
-  0 -> pure ()
-  _ -> void $ BI.memset p x (fromIntegral len)
-{-# INLINE _memset #-}
-
--- XXX This doesn't really work because most ByteString are PlainPtr inside.
--- addZeroFinalizer :: B.ByteString -> IO ()
--- addZeroFinalizer b = do
---   let (fp, off, len) = BI.toForeignPtr b
---   FC.addForeignPtrFinalizer fp
---     $! zero (plusPtr (unsafeForeignPtrToPtr fp) off) len
+-- | Like 'plusPtr', except it takes an 'Interval' so as to avoid having
+-- to litter the calling code with 'I.unInterval'.
+_plusPtr
+  :: I.Upcast (I.TypeEnds Int) Int e a
+  => Ptr x -- ^ ptr
+  -> I.Interval e a -- ^ diff
+  -> Ptr x
+_plusPtr p d = plusPtr p (I.unInterval' (I.upcast d :: I.TypeInterval Int))
 
 --------------------------------------------------------------------------------
 
-toBase16 :: (Peek a, Alloc b) => a -> b
-toBase16 bin =
-  let binL = length bin
-      b16L = _int (toInteger binL * 2)
-   in fst $
-        allocFreeze b16L $ \b16P -> do
-          peek bin $ \binP -> do
-            out <- c_by_to_base16 b16P (fromIntegral b16L) binP
-            when (out /= 0) $ error "toBase16"
+-- | Encode @a@ as base-16. 'Nothing' if result doesn't fit in @b@.
+toBase16 :: (Peek a, Alloc b) => a -> Maybe b
+toBase16 = \bin -> do
+  b16L <- I.intervalFrom' (I.unInterval' (length bin) * 2 :: Integer)
+  pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
+         peek bin $ \binP -> do
+           ret <- c_by_to_base16 b16P (I.unInterval' b16L) binP
+           when (ret /= 0) $ fail "toBase16: unexpected internal error"
 
-fromBase16 :: (Peek a, Alloc b) => a -> Maybe b
+-- | Encode @a@ as base-16. The result is known to fit in @b@.
+toBase16N
+ :: forall a b
+ .  ( Peek a
+    , Alloc b
+    , MinLength b <= MinLength a GHC.TypeNats.* 2
+    , MaxLength a GHC.TypeNats.* 2 <= MaxLength b )
+ => a
+ -> b
+toBase16N = fromMaybe (error "toBase16N: impossible") . toBase16
+
+fromBase16 :: forall a b. (Peek a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
-  let b16L :: Int = length b16
-  guard (b16L `mod` 2 == 0)
-  let binL :: Int = b16L `div` 2
-      (bin, ret) = do
-        allocFreeze binL $ \binP -> do
-          peek b16 $ \b16P -> do
-            c_by_from_base16 binP b16P (fromIntegral b16L)
-  guard (ret == 0)
-  Just bin
-
-fromBase16N :: forall a b. (Peek a, AllocN b) => a -> Maybe b
-fromBase16N b16 = do
-  let b16L :: Int = length b16
-      binL :: Int = fromIntegral (natVal (Proxy @(Length b)))
-  guard (binL * 2 == b16L)
-  let (bin, ret) = do
-        allocFreezeN $ \binP -> do
-          peek b16 $ \b16P -> do
-            c_by_from_base16 binP b16P (fromIntegral b16L)
+  let b16L = length b16
+  binL <- case divMod (I.unInterval b16L) 2 of
+            (d, 0) -> I.intervalFrom d
+            _      -> Nothing
+  let (bin, ret) = unsafeAllocFreeze binL $ \binP ->
+                   peek b16 $ \b16P ->
+                   c_by_from_base16 binP b16P (I.unInterval' b16L)
   guard (ret == 0)
   Just bin
 
 --------------------------------------------------------------------------------
 
--- | Construct an 'CSize', or fail if outside bounds.
-{-# INLINE _csize #-}
-_csize :: Int -> CSize
-_csize a
-  | a < 0 = error "_csize: too small"
-  | otherwise = fromIntegral a
+foreign import ccall unsafe "string.h memcpy"
+  c_memcpy
+    :: Ptr Word8 -- ^ dst
+    -> Ptr Word8 -- ^ src
+    -> CSize -- ^ len
+    -> IO (Ptr Word8)
 
--- | Construct an 'Int', or fail if outside bounds.
-{-# INLINE _int #-}
-_int :: Integer -> Int
-_int a
-  | a > toInteger (maxBound :: Int) = error "_int: too large"
-  | otherwise = fromIntegral a
-
--- | Constant-time equality.
-{-# INLINE constEq #-}
-constEq :: forall a b. (Peek a, Peek b) => a -> b -> Bool
-constEq a b = constCompare a b == EQ
-
--- | Constant-time ordering.
-{-# NOINLINE constCompare #-}
-constCompare :: forall a b. (Peek a, Peek b) => a -> b -> Ordering
-constCompare a b = unsafeDupablePerformIO $ do
-  peek a $ \aP -> do
-    let aL = _csize (length a)
-    peek b $ \bP -> do
-      let bL = _csize (length b)
-      pure $! compare (c_by_memcmp_const aP aL bP bL) 0
-
---------------------------------------------------------------------------------
-
--- | Like the one from the 'constraints' library.
-data Dict c where
-  Dict :: c => Dict c
-
---------------------------------------------------------------------------------
+foreign import ccall unsafe "string.h memset"
+  c_memset
+    :: Ptr Word8 -- ^ ptr
+    -> Word8 -- ^ value
+    -> CSize -- ^ len
+    -> IO ()
 
 foreign import ccall unsafe "by.h by_to_base16"
   c_by_to_base16
@@ -706,47 +851,3 @@ foreign import ccall unsafe "by.h by_from_base16"
     -> Ptr Word8 -- ^ base16
     -> CSize -- ^ base16_len
     -> IO CInt
-
-foreign import ccall unsafe "by.h by_memcmp_const"
-  c_by_memcmp_const
-    :: Ptr Word8 -- ^ a
-    -> CSize -- ^ a_len
-    -> Ptr Word8 -- ^ b
-    -> CSize -- ^ b_len
-    -> CInt
-
-foreign import ccall unsafe "by.h by_store64le"
-  c_by_store64le :: Ptr Word8 -> Word64 -> IO ()
-
-foreign import ccall unsafe "by.h by_store64be"
-  c_by_store64be :: Ptr Word8 -> Word64 -> IO ()
-
-foreign import ccall unsafe "by.h by_store32le"
-  c_by_store32le :: Ptr Word8 -> Word32 -> IO ()
-
-foreign import ccall unsafe "by.h by_store32be"
-  c_by_store32be :: Ptr Word8 -> Word32 -> IO ()
-
-foreign import ccall unsafe "by.h by_store16le"
-  c_by_store16le :: Ptr Word8 -> Word16 -> IO ()
-
-foreign import ccall unsafe "by.h by_store16be"
-  c_by_store16be :: Ptr Word8 -> Word16 -> IO ()
-
-foreign import ccall unsafe "by.h by_load64le"
-  c_by_load64le :: Ptr Word8 -> Word64
-
-foreign import ccall unsafe "by.h by_load64be"
-  c_by_load64be :: Ptr Word8 -> Word64
-
-foreign import ccall unsafe "by.h by_load32le"
-  c_by_load32le :: Ptr Word8 -> Word32
-
-foreign import ccall unsafe "by.h by_load32be"
-  c_by_load32be :: Ptr Word8 -> Word32
-
-foreign import ccall unsafe "by.h by_load16le"
-  c_by_load16le :: Ptr Word8 -> Word16
-
-foreign import ccall unsafe "by.h by_load16be"
-  c_by_load16be :: Ptr Word8 -> Word16
