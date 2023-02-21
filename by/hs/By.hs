@@ -48,6 +48,7 @@ module By {--}
   , unsafeSized
   , withSized
   , withSizedMinMax
+  , withSizedMinMaxN
 
     -- * Base16
   , toBase16
@@ -152,6 +153,19 @@ intervalDowncast
   => Interval lu ru
   -> Maybe (Interval ld rd)
 intervalDowncast = intervalFrom . intervalInt
+
+withInterval
+  :: forall l r a
+  .  (KnownNat l, KnownNat r)
+  => Interval l r
+  -> (forall n. (KnownNat n, l <= n, n <= r) => Proxy n -> a)
+  -> a
+withInterval i f
+  | SomeNat (pn :: Proxy n) <- someNatVal (intervalNatural i)
+  , Just Dict <- proveLE @l @n
+  , Just Dict <- proveLE @n @r
+  = f pn
+  | otherwise = error "withInterval: impossible"
 
 -- | The returned number is at least @l@, at most @r@.
 intervalInt :: Interval l r -> Int
@@ -514,11 +528,9 @@ withSized
         => Sized len t
         -> a)
   -> a
-withSized t g = fromMaybe (error "By.withSized") $
-  withSizedMinMax @(MinLength t) @(MaxLength t) t g
+withSized = withSizedMinMaxN @(MinLength t) @(MaxLength t)
 
--- | Wrap the @t@ in a 'Sized' of some unknown length
--- within @min@ and @max@.
+-- | Wrap the @t@ in a 'Sized' of some unknown length within @min@ and @max@.
 withSizedMinMax
   :: forall min max t a
   .  ( GetLength t
@@ -540,6 +552,28 @@ withSizedMinMax t g = do
   Dict <- proveLE @len @(MaxLength t)
   Dict <- pure $ evidence $ leTrans @len @(MaxLength t) @MaxInt
   pure $ g (Sized t :: Sized len t)
+
+-- | Wrap the @t@ in a 'Sized' of length known to be within @min@ and @max@.
+withSizedMinMaxN
+  :: forall min max t a
+  .  ( GetLength t
+     , min <= MinLength t
+     , MaxLength t <= max
+     , KnownNat min
+     , KnownNat max )
+  => t
+  -> ( forall len
+       .  ( KnownLength (Sized len t)
+          , min <= len
+          , len <= max )
+       => Sized len t
+       -> a )
+  -> a
+withSizedMinMaxN t = withInterval (length t) $ \(_ :: Proxy len) ->
+  case evidence $ leTrans @min @(MinLength t) @len of
+    Dict -> case evidence $ leTrans @len @(MaxLength t) @max of
+      Dict -> case evidence $ leTrans @len @(MaxLength t) @MaxInt of
+        Dict -> \f -> f (Sized t :: Sized len t)
 
 proveLE
   :: forall l r
