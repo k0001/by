@@ -130,7 +130,7 @@ type MaxInt = Div (2 ^ (Size Int * 8)) 2 - 1
 -- * @r@ can be at most 'MaxInt' (see 'intervalAbsurdMax').
 --
 -- * @l@ can be at most @r@ (see 'intervalAbsurdLR').
-newtype Interval l r = UnsafeInterval Int
+newtype Interval (l :: Nat) (r :: Nat) = UnsafeInterval Int
   deriving newtype (Eq, Ord, Show)
 
 intervalAbsurdLR :: (r < l) => Interval l r -> Void
@@ -312,7 +312,7 @@ copyN a =
       c_memcpy bP aP (intervalCSize aL)
 
 
--- | @'appendN' a b@ concatenates @a@ and @b@, in that order.
+-- | @'append' a b@ concatenates @a@ and @b@, in that order.
 append
   :: forall a b c
   .  ( Peek a
