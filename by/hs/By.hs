@@ -421,12 +421,7 @@ shows :: Peek a => a -> ShowS
 shows = showString . fmap (chr . fromIntegral) . unpack
 
 -- | Encodes @a@ using Base-16 encoding and then renders it as a 'String'.
-showsBase16N
-  :: forall a
-  .  ( Peek a
-     , MaxLength a * 2 <= MaxLength B.ByteString )
-  => a
-  -> ShowS
+showsBase16N :: forall a. (Peek a, MaxLength a * 2 <= MaxInt) => a -> ShowS
 showsBase16N = case zeroLe @(MinLength a * 2) of
     Dict -> shows @B.ByteString . toBase16N
 
