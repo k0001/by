@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -9,6 +10,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE NoStarIsType #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -21,42 +23,24 @@
 #include <MachDeps.h>
 
 module By {--}
-  ( GetLength (..)
+  ( -- * Length
+    GetLength (..)
   , LengthInterval
-  , LengthEnds
-
-  , LengthIntervalHard
-  , LengthEndsHard
-
   , KnownLength(..)
   , lengthN
 
-  , Peek (..)
-
-  , Poke
-  , poke
-
+    -- * Allocation
   , Alloc (..)
   , unsafeAllocFreeze
-
   , allocN
   , unsafeAllocFreezeN
 
-  , pack
-  , unpack
-  , shows
-  , copy
-  , copyN
-  , replicate
-  , replicateN
-  , padLeftN
-  , padRightN
-  , appendN
-  , takeN
-  , dropN
-  , splitAtN
-  , concat
+    -- * Peek & Poke
+  , Peek (..)
+  , Poke
+  , poke
 
+    -- * Sized
   , Sized
   , unSized
   , sized
@@ -64,15 +48,46 @@ module By {--}
   , withSized
   , withSizedMinMax
 
+    -- * Base16
   , toBase16
   , toBase16N
   , fromBase16
 
+
+    -- * Utils
+  , pack
+  , unpack
+  , shows
+  , showsBase16N
+  , copy
+  , copyN
+  , replicate
+  , replicateN
+  , padLeftN
+  , padRightN
+  , append
+  , takeN
+  , dropN
+  , splitAtN
+  , concat
+
+  -- * Endiannes
   , Endian(..)
   , Size
 
-  -- * Misc
-  , proveLE
+  -- * Interval
+  , MaxInt
+  , Interval
+  , interval
+  , intervalFrom
+  , intervalUpcast
+  , intervalDowncast
+  , intervalInt
+  , intervalCSize
+  , intervalInteger
+  , intervalNatural
+  , intervalAbsurdLR
+  , intervalAbsurdMax
   ) --}
 where
 
@@ -82,78 +97,114 @@ import Data.ByteString.Internal qualified as BI
 import Data.Char (chr)
 import Data.Coerce
 import Data.Constraint
+import Data.Constraint.Nat
 import Data.Foldable qualified as F
 import Data.Int
 import Data.Kind
 import Data.Maybe (fromMaybe)
 import Data.Proxy
 import Data.Tagged
-import Data.Type.Ord (OrderingI(..))
+import Data.Type.Ord
+import Data.Void
 import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import Foreign.Storable qualified as Sto
-import GHC.TypeNats hiding (type (<=))
+import GHC.TypeNats
 import Prelude hiding (concat, length, replicate, shows)
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
-import Interval (type (<=))
-import Interval qualified as I
+--------------------------------------------------------------------------------
+
+-- | Type-level version of @'maxBound' :: 'Int'@. This value is machine-dependent.
+type MaxInt = Div (2 ^ (Size Int * 8)) 2 - 1
+
+-- | An natural number known to be at least @l@, at most @r@.
+--
+-- * Construct safely with 'interval', 'intervalFrom', 'intervalUpcast' or
+-- 'intervalDowncast'.
+--
+-- * @r@ can be at most 'MaxInt' (see 'intervalAbsurdMax').
+--
+-- * @l@ can be at most @r@ (see 'intervalAbsurdLR').
+newtype Interval l r = UnsafeInterval Int
+  deriving newtype (Eq, Ord, Show)
+
+intervalAbsurdLR :: (r < l) => Interval l r -> Void
+intervalAbsurdLR !_ = error "By.intervalAbsurdLR"
+
+intervalAbsurdMax :: (MaxInt < r) => Interval l r -> Void
+intervalAbsurdMax !_ = error "By.intervalAbsurdMax"
+
+intervalUpcast
+  :: forall ld rd lu ru
+  .  (lu <= ld, lu <= ru, rd <= ru)
+  => Interval ld rd
+  -> Interval lu ru
+intervalUpcast = coerce
+
+intervalDowncast
+  :: forall lu ru ld rd
+  .  (KnownNat ld, KnownNat rd)
+  => Interval lu ru
+  -> Maybe (Interval ld rd)
+intervalDowncast = intervalFrom . intervalInt
+
+-- | The returned number is at least @l@, at most @r@.
+intervalInt :: Interval l r -> Int
+intervalInt = coerce
+
+-- | The returned number is at least @l@, at most @r@.
+intervalCSize :: Interval l r -> CSize
+intervalCSize = fromIntegral . intervalInt
+
+-- | The returned number is at least @l@, at most @r@.
+intervalInteger :: Interval l r -> Integer
+intervalInteger = fromIntegral . intervalInt
+
+-- | The returned number is at least @l@, at most @r@.
+intervalNatural :: Interval l r -> Natural
+intervalNatural = fromIntegral . intervalInt
+
+interval
+  :: forall n l r
+  .  (KnownNat n, l <= n, n <= r, r <= MaxInt)
+  => Interval l r
+interval = UnsafeInterval (fromIntegral (natVal (Proxy @n)))
+
+intervalFrom
+  :: forall n l r
+  .  (Integral n, KnownNat l, KnownNat r)
+  => n
+  -> Maybe (Interval l r)
+intervalFrom = \i -> do
+    let n :: Natural = fromIntegral i
+    -- We check (l <= r) and (r <= z) here so as to keep constraints simpler.
+    guard (l <= n && n <= r && r <= z)
+    pure (UnsafeInterval (fromIntegral i))
+  where
+    l = natVal (Proxy @l)
+    r = natVal (Proxy @r)
+    z = natVal (Proxy @MaxInt)
 
 --------------------------------------------------------------------------------
 
--- | Hard maximum length interval ends supported by this library.
--- We want 'length' to stay within 'Int' bounds since most Haskell libraries
--- use 'Int' instead of 'CSize' for counting length.
-type LengthEndsHard = I.CC 0 (I.MaxBound Int)
-
-_test_LengthEndsHard =  Dict
-_test_LengthEndsHard :: Dict (LengthEndsHard `I.SubOf` I.TypeEnds CSize)
-
-type LengthIntervalHard = I.Interval LengthEndsHard Int
-
--- | Interval endpoints for @'LengthInterval' t@.
-type LengthEnds (t :: Type) = I.CC (MinLength t) (MaxLength t)
-
--- | The type of 'length'. Essentially, a positive interval of 'Int' counting
--- the number of bytes of user data that fit in @t@, excluding any extra bytes
--- that may be required by its structure that are not intended for user data.
-type LengthInterval (t :: Type) = I.Interval (LengthEnds t) Int
-
--- | Superclass 'Constraint's for @'GetLength' t@.
-
--- TODO: some of the constraints here are redundant. Simplify if it annoys
--- downstream usage.
-type GetLength' (t :: Type) =
-  ( LengthEnds t `I.SubOf` LengthEndsHard
-  , LengthEnds t `I.Contains` MinLength t
-  , LengthEnds t `I.Contains` MaxLength t
-
-  , I.KnownInterval (LengthEnds t) Int
-  , I.KnownNum (MinLength t) Int
-  , I.KnownNum (MaxLength t) Int
-
-  , I.KnownNum (MinLength t) CSize
-  , I.KnownNum (MaxLength t) CSize
-  , I.KnownInterval (LengthEnds t) CSize
-
-  , I.KnownNum (MinLength t) Natural
-  , I.KnownNum (MaxLength t) Natural
-  , I.KnownInterval (LengthEnds t) Natural
-
-  , KnownNat (MinLength t)
-  , KnownNat (MaxLength t)
-  ) :: Constraint
+type LengthInterval (t :: Type) = Interval (MinLength t) (MaxLength t)
 
 -- | Runtime byte length discovery.
-class GetLength' t => GetLength t where
+class
+  ( KnownNat (MinLength t)
+  , KnownNat (MaxLength t)
+  , MinLength t <= MaxLength t
+  , MaxLength t <= MaxInt
+  ) => GetLength t where
   type MinLength (t :: Type) :: Natural
   type MaxLength (t :: Type) :: Natural
   length :: t -> LengthInterval t
   default length :: KnownLength t => t -> LengthInterval t
-  length (_ :: t) = lengthN (Proxy @t)
+  length (_ :: t) = lengthN @t
 
 -- | Statically known byte length.
 class
@@ -173,8 +224,8 @@ instance
   ) => KnownLength (t :: Type) where
 
 -- | Get statically known byte length.
-lengthN :: forall t. KnownLength t => Proxy t -> LengthInterval t
-lengthN _ = I.intervalVal (Proxy @(Length t))
+lengthN :: forall t. KnownLength t => LengthInterval t
+lengthN = interval @(Length t)
 
 -- | Raw byte access for read-only purposes.
 --
@@ -212,11 +263,12 @@ unsafeAllocFreeze len g = unsafePerformIO (alloc len g)
 
 -- | @'replicate' n x@ repeats @n@ times the byte @x@.
 replicate :: Alloc a => LengthInterval a -> Word8 -> a
-replicate len x = fst $ unsafeAllocFreeze len (\p -> _memset p x len)
+replicate len x = fst $ unsafeAllocFreeze len $ \p ->
+                        c_memset p x (intervalCSize len)
 
 -- | Fixed byte length allocation and initialization.
 allocN :: forall t p a. (Alloc t, KnownLength t) => (Ptr p -> IO a) -> IO (t, a)
-allocN = alloc (lengthN (Proxy @t))
+allocN = alloc (lengthN @t)
 
 -- | Like 'allocN', but “pure”. This is safe as long as the
 -- initialization procedure only interacts with @'Length' t@
@@ -232,57 +284,60 @@ unsafeAllocFreezeN g = unsafePerformIO (allocN g)
 
 -- | @'replicate' x@ repeats @'Length' a@ times the byte @x@.
 replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
-replicateN = replicate (lengthN (Proxy @a))
+replicateN = replicate (lengthN @a)
 
 -- | @'copy' a@ copies all of @a@ into a different memory address, if it fits.
-copy
-  :: forall a b
-  .  ( Peek a
-     , Alloc b )
-  => a
-  -> Maybe b
+copy :: forall a b. (Peek a, Alloc b) => a -> Maybe b
 copy a = do
-   bL :: LengthInterval b <- I.downcast (length a)
+   bL <- intervalDowncast (length a)
    pure $ fst $
           unsafeAllocFreeze bL $ \bP ->
           peek a $ \aP ->
-          _memcpy bP aP bL
+          c_memcpy bP aP (intervalCSize bL)
 
 -- | @'copyN' a@ copies all of @a@ into a different memory address.
 copyN
   :: forall a b
   .  ( Peek a
      , Alloc b
-     , LengthEnds a `I.SubOf` LengthEnds b )
+     , MinLength b <= MinLength a
+     , MaxLength a <= MaxLength b )
   => a
   -> b
 copyN a =
-  let bL = length a
-  in  fst $ unsafeAllocFreeze (I.upcast bL) $ \bP ->
+  let aL = length a
+  in  fst $ unsafeAllocFreeze (intervalUpcast aL) $ \bP ->
       peek a $ \aP ->
-      _memcpy bP aP bL
+      c_memcpy bP aP (intervalCSize aL)
+
 
 -- | @'appendN' a b@ concatenates @a@ and @b@, in that order.
-appendN
+append
   :: forall a b c
   .  ( Peek a
      , Peek b
      , Alloc c
-     , KnownLength a
-     , KnownLength b
-     , KnownLength c
-     , Length c ~ (Length a + Length b) )
+     , MinLength c <= MinLength a + MinLength b
+     , MaxLength a + MaxLength b <= MaxLength c )
   => a
   -> b
   -> c
-appendN =
-  let aL = lengthN (Proxy @a)
-      bL = lengthN (Proxy @b)
-  in \a b -> fst $ unsafeAllocFreezeN $ \cP ->
-                   peek a $ \aP ->
-                   peek b $ \bP -> do
-                     _memcpy cP aP aL
-                     _memcpy (_plusPtr cP aL) bP bL
+append a b =
+    fst $
+    unsafeAllocFreeze cL $ \cP ->
+    peek a $ \aP ->
+    peek b $ \bP -> do
+      void $ c_memcpy cP aP (intervalCSize aL)
+      void $ c_memcpy (plusPtr cP (intervalInt aL)) bP (intervalCSize bL)
+  where
+    aL = length a
+    bL = length b
+    cL | SomeNat (_ :: Proxy cL) <-
+           someNatVal (intervalNatural aL + intervalNatural bL)
+       , Just Dict <- proveLE @cL @(MaxLength c)
+       , Just Dict <- proveLE @(MinLength c) @cL
+       = interval @cL
+       | otherwise = error "By.append: impossible"
 
 -- | @'splitAtN' a@ splits @a@ into two parts of known lengths.
 --
@@ -298,13 +353,13 @@ splitAtN
   => a
   -> (b, c)
 splitAtN =
-  let bL = lengthN (Proxy @b)
-      cL = lengthN (Proxy @c)
+  let bL = lengthN @b
+      cL = lengthN @c
   in \a -> unsafeAllocFreezeN $ \bP ->
            fmap fst $ allocN $ \cP ->
            peek a $ \aP -> do
-             _memcpy bP aP bL
-             _memcpy cP (_plusPtr aP bL) cL
+             void $ c_memcpy bP aP (intervalCSize bL)
+             c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
 
 -- | @'takeN' a@ copies the leading part of @a@ of known length.
 takeN
@@ -316,10 +371,10 @@ takeN
   => a
   -> b
 takeN =
-  let bL = lengthN (Proxy @b)
+  let bL = lengthN @b
   in  \a -> fst $ unsafeAllocFreezeN $ \bP ->
                   peek a $ \aP ->
-                  _memcpy bP aP bL
+                  c_memcpy bP aP (intervalCSize bL)
 
 -- | @'takeN' a@ copies the trailing part of @a@ of known length.
 dropN
@@ -334,16 +389,16 @@ dropN
 dropN = \a ->
     fst $ unsafeAllocFreezeN $ \bP ->
           peek a $ \aP ->
-          _memcpy bP (plusPtr aP pL') bL
+          c_memcpy bP (plusPtr aP pL') (intervalCSize bL)
   where
-    aL = lengthN (Proxy @a)
-    bL = lengthN (Proxy @b)
-    pL' = I.unInterval aL - I.unInterval bL
+    aL = lengthN @a
+    bL = lengthN @b
+    pL' = intervalInt aL - intervalInt bL
 
 -- | 'Nothing' if the result doesn't fit in @a@.
 pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
 pack ws = do
-  aL <- I.intervalFrom (F.length ws)
+  aL <- intervalFrom (F.length ws)
   pure $ fst $ unsafeAllocFreeze aL $ \aP ->
          F.foldlM (\off w -> do c_memset (plusPtr aP off) w 1
                                 pure $! off + 1)
@@ -352,7 +407,7 @@ pack ws = do
 
 {-# NOINLINE unpack #-}
 unpack :: Peek a => a -> [Word8]
-unpack a = unsafeDupablePerformIO $ peek a (f (I.unInterval' (length a)))
+unpack a = unsafeDupablePerformIO $ peek a (f (intervalInt (length a)))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
     f 0 !_ = pure []
@@ -360,21 +415,30 @@ unpack a = unsafeDupablePerformIO $ peek a (f (I.unInterval' (length a)))
                 !xs <- f (n - 1) (plusPtr p 1)
                 pure (x : xs)
 
+-- | Renders @a@ as a literal 'String'.
 shows :: Peek a => a -> ShowS
 shows = showString . fmap (chr . fromIntegral) . unpack
+
+-- | Encodes @a@ using Base-16 encoding and then renders it as a 'String'.
+showsBase16N
+  :: forall a
+  .  ( Peek a
+     , MaxLength a * 2 <= MaxLength B.ByteString )
+  => a
+  -> ShowS
+showsBase16N = case zeroLe @(MinLength a * 2) of
+    Dict -> shows @B.ByteString . toBase16N
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
 concat :: forall a b. (Peek a, Alloc b) => [a] -> Maybe b
 concat as = do
-  bL <- do
-    -- We add lengths as 'Natural' to avoid overflowing 'Int' while adding.
-    x <- I.intervalFrom $ F.sum $ fmap (I.unInterval' . length) as
-    I.downcast (x :: I.Interval LengthEndsHard Natural)
+  -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
+  bL <- intervalFrom $ F.sum $ fmap (intervalInteger . length) as
   Just $ fst $ unsafeAllocFreeze bL $ \outP ->
          F.foldlM (\off a -> peek a $ \aP -> do
                       let aL = length a
-                      _memcpy (plusPtr outP off) aP aL
-                      pure $! off + I.unInterval' aL)
+                      void $ c_memcpy (plusPtr outP off) aP (intervalCSize aL)
+                      pure $! off + intervalInt aL)
          0
          as
 
@@ -387,7 +451,7 @@ instance Peek () where
 instance GetLength () where
   type MinLength () = 0
   type MaxLength () = 0
-  length () = I.intervalVal (Proxy @0)
+  length () = interval @0
 
 --------------------------------------------------------------------------------
 
@@ -403,7 +467,8 @@ deriving newtype instance (GetLength (Sized len t), Peek t)
 deriving newtype instance (Peek (Sized len t), Poke t)
   => Poke (Sized len t)
 
-instance GetLength' (Sized len t) => GetLength (Sized len t) where
+instance (KnownNat len, MinLength t <= len, len <= MaxLength t, len <= MaxInt)
+  => GetLength (Sized len t) where
   type MinLength (Sized len t) = len
   type MaxLength (Sized len t) = len
 
@@ -414,7 +479,7 @@ instance
   , KnownLength (Sized len t)
   ) => Alloc (Sized len t) where
   alloc l g = do
-    (t, a) <- alloc (I.upcast l) g
+    (t, a) <- alloc (intervalUpcast l) g
     pure (Sized t, a)
 
 unSized :: Sized len t -> t
@@ -428,12 +493,11 @@ sized
   => t
   -> Maybe (Sized len t)
 sized = \t -> do
-  let pLen = Proxy @len
-  Dict <- proveLE (Proxy @(MinLength t)) pLen
-  Dict <- proveLE pLen (Proxy @(MaxLength t))
-  Dict <- proveLE pLen (Proxy @(I.MaxBound Int))
-  tL :: LengthInterval t <- I.downcast (length t)
-  guard (tL == I.intervalVal (Proxy @len))
+  Dict <- proveLE @(MinLength t) @len
+  Dict <- proveLE @len @(MaxLength t)
+  Dict <- pure $ evidence $ leTrans @len @(MaxLength t) @MaxInt
+  tL <- intervalFrom (intervalInt (length t))
+  guard (tL == lengthN @(Sized len t))
   pure (Sized t)
 
 -- | Wrap the @t@ in a 'Sized' if it has the correct length,
@@ -443,7 +507,7 @@ unsafeSized
   .  (KnownNat len, GetLength t)
   => t
   -> Sized len t
-unsafeSized = fromMaybe (error "unsafeSized") . sized
+unsafeSized = fromMaybe (error "By.unsafeSized") . sized
 
 withSized
   :: forall t a
@@ -454,8 +518,8 @@ withSized
         => Sized len t
         -> a)
   -> a
-withSized t g = fromMaybe (error "withSized") $
-  withSizedMinMax (Proxy @(MinLength t)) (Proxy @(MaxLength t)) t g
+withSized t g = fromMaybe (error "By.withSized") $
+  withSizedMinMax @(MinLength t) @(MaxLength t) t g
 
 -- | Wrap the @t@ in a 'Sized' of some unknown length
 -- within @min@ and @max@.
@@ -464,9 +528,7 @@ withSizedMinMax
   .  ( GetLength t
      , KnownNat min
      , KnownNat max )
-  => Proxy min
-  -> Proxy max
-  -> t
+  => t
   -> ( forall len
        .  ( KnownLength (Sized len t)
           , min <= len
@@ -474,23 +536,22 @@ withSizedMinMax
        => Sized len t
        -> a )
   -> Maybe a
-withSizedMinMax pMin pMax t g = do
-  SomeNat (pLen :: Proxy len) <- pure $ someNatVal $ I.unInterval' (length t)
-  Dict <- proveLE pMin pLen
-  Dict <- proveLE pLen pMax
-  Dict <- proveLE (Proxy @0) pLen
-  Dict <- proveLE pLen (Proxy @(I.MaxBound Int))
-  Dict <- proveLE pLen (Proxy @(I.MaxBound CSize))
+withSizedMinMax t g = do
+  SomeNat (_ :: Proxy len) <- pure $ someNatVal $ intervalNatural (length t)
+  Dict <- proveLE @min @len
+  Dict <- proveLE @len @max
+  Dict <- proveLE @(MinLength t) @len
+  Dict <- proveLE @len @(MaxLength t)
+  Dict <- pure $ evidence $ leTrans @len @(MaxLength t) @MaxInt
   pure $ g (Sized t :: Sized len t)
 
 proveLE
-  :: (KnownNat l, KnownNat r)
-  => Proxy l
-  -> Proxy r
-  -> Maybe (Dict (l <= r))
-proveLE l r = case cmpNat l r of
-  EQI -> Just $ unsafeCoerce (Dict @(0 <= 0))
-  LTI -> Just $ unsafeCoerce (Dict @(0 <= 1))
+  :: forall l r
+  .  (KnownNat l, KnownNat r)
+  => Maybe (Dict (l <= r))
+proveLE = case cmpNat (Proxy @l) (Proxy @r) of
+  EQI -> Just $ unsafeCoerce (Dict @())
+  LTI -> Just $ unsafeCoerce (Dict @())
   GTI -> Nothing
 
 --------------------------------------------------------------------------------
@@ -508,20 +569,24 @@ type instance Size Int64  = 8
 type instance Size CSize = Size Word
 
 #if WORD_SIZE_IN_BITS == 64
+-- | This value is machine-dependent.
 type instance Size Int  = Size Int64
+-- | This value is machine-dependent.
 type instance Size Word = Size Word64
 #elif WORD_SIZE_IN_BITS == 32
+-- | This value is machine-dependent.
 type instance Size Int  = Size Int32
+-- | This value is machine-dependent.
 type instance Size Word = Size Word32
 #else
-#  error "Unexpected WORD_SIZE_IN_BYTES"
+# error "Unexpected WORD_SIZE_IN_BYTES"
 #endif
 
 --------------------------------------------------------------------------------
 
 -- | Conversion between host byte encoding and Little-Endian or
 -- Big-Endian byte encoding.
-class I.KnownNum (Size a) Int => Endian a where
+class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
   {-# MINIMAL hToLE, hToBE, leToH, beToH #-}
   -- | From host encoding to Little-Endian encoding.
   hToLE :: a -> Tagged "LE" a
@@ -533,25 +598,28 @@ class I.KnownNum (Size a) Int => Endian a where
   beToH :: Tagged "BE" a -> a
 
   -- | Writes @a@ in @h@ using the host encoding.
-  encodeH :: forall h. (Alloc h, LengthEnds h `I.Contains` Size a) => a -> h
+  encodeH
+    :: forall h. (Alloc h, MinLength h <= Size a, Size a <= MaxLength h)
+    => a -> h
   -- | Default implementation in case there is a @'Sto.Storable' a@ instance.
   default encodeH
     :: forall h
-    .  ( Alloc h
-       , LengthEnds h `I.Contains` Size a
-       , Sto.Storable a )
+    .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Sto.Storable a)
     => a -> h
   encodeH = fst
-          . unsafeAllocFreeze (I.intervalVal (Proxy @(Size a)))
+          . unsafeAllocFreeze (interval @(Size a))
           . flip Sto.poke
 
   -- | Writes @a@ in @le@ using Litle-Endian encoding.
-  encodeLE :: forall le. (Alloc le, LengthEnds le `I.Contains` Size a) => a -> le
+  encodeLE
+    :: forall le. (Alloc le, MinLength le <= Size a, Size a <= MaxLength le)
+    => a -> le
   encodeLE = encodeH . unTagged . hToLE
 
   -- | Writes @a@ in @be@ using Big-Endian encoding.
   encodeBE
-    :: forall be. (Alloc be, LengthEnds be `I.Contains` Size a) => a -> be
+    :: forall be. (Alloc be, MinLength be <= Size a, Size a <= MaxLength be)
+    => a -> be
   encodeBE = encodeH . unTagged . hToBE
 
   -- | Reads @a@ from @h@ using the host encoding.
@@ -594,6 +662,7 @@ instance Endian Word64 where
   leToH = coerce le64toh
   beToH = coerce be64toh
 
+-- | This instance is machine-dependent.
 instance Endian Int where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
@@ -624,12 +693,14 @@ instance Endian Int64 where
   leToH = fromIntegral . le64toh . fromIntegral . unTagged
   beToH = fromIntegral . be64toh . fromIntegral . unTagged
 
+-- | This instance is machine-dependent.
 instance Endian CSize where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
   leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
   beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
 
+-- | This instance is machine-dependent.
 instance Endian Word where
 #if WORD_SIZE_IN_BITS == 64
   hToLE = fmap (fromIntegral @Word64) . hToLE . fromIntegral
@@ -692,12 +763,11 @@ padLeftN w a =
   fst $
   unsafeAllocFreezeN $ \bP ->
   peek a $ \aP -> do
-    let bLi :: Int   = I.unInterval (lengthN (Proxy @b))
-        aLi :: Int   = I.unInterval (length a)
-        dLi :: Int   = bLi - aLi -- no overflow because (aLs <= bLi)
-        dLs :: CSize = fromIntegral dLi -- safe because LengthEndsHard
-    c_memset bP w dLs
-    c_memcpy (plusPtr bP dLi) aP (I.unInterval' (length a))
+    let bL = lengthN @b
+        aL = length a
+        dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+    c_memset bP w (fromIntegral dLi)
+    c_memcpy (plusPtr bP dLi) aP (intervalCSize aL)
 
 -- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its right.
 -- Returns a copy.
@@ -714,20 +784,19 @@ padRightN w a =
   fst $
   unsafeAllocFreezeN $ \bP ->
   peek a $ \aP -> do
-    let bLi :: Int   = I.unInterval (lengthN (Proxy @b))
-        aLi :: Int   = I.unInterval (length a)
-        dLi :: Int   = bLi - aLi -- no overflow because (aLs <= bLi)
-        dLs :: CSize = fromIntegral dLi -- safe because LengthEndsHard
-    void $ c_memcpy bP aP (I.unInterval' (length a))
-    c_memset (plusPtr bP aLi) w dLs
+    let aL = length a
+        bL = lengthN @b
+        dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+    void $ c_memcpy bP aP (intervalCSize aL)
+    c_memset (plusPtr bP (intervalInt aL)) w (fromIntegral dLi)
 
 --------------------------------------------------------------------------------
 
 instance GetLength B.ByteString where
   type MinLength B.ByteString = 0
-  type MaxLength B.ByteString = I.MaxBound Int
-  length = fromMaybe (error "By.lenght: unsupported ByteString length")
-         . I.intervalFrom
+  type MaxLength B.ByteString = MaxInt
+  length = fromMaybe (error "By.lenght: unexpected ByteString length")
+         . intervalFrom
          . B.length
 
 instance Peek B.ByteString where
@@ -737,77 +806,42 @@ instance Peek B.ByteString where
 
 instance Alloc B.ByteString where
   alloc len g = do
-    let len' = I.unInterval len
+    let len' = intervalInt len
     fp <- BI.mallocByteString len'
     a <- withForeignPtr fp (g . castPtr)
     pure (BI.fromForeignPtr fp 0 len', a)
 
 --------------------------------------------------------------------------------
 
--- | Like 'c_memcpy', except it takes an 'Interval' so as to avoid having
--- to litter the calling code with 'I.unInterval'.
-_memcpy
-  :: I.Upcast LengthEndsHard CSize e a
-  => Ptr Word8 -- ^ dst
-  -> Ptr Word8 -- ^ src
-  -> I.Interval e a
-  -> IO ()
-_memcpy dst src len =
-  void $ c_memcpy dst src
-       $ I.unInterval (I.upcast len :: I.Interval LengthEndsHard CSize)
-
--- | Like 'c_memset', except it takes an 'Interval' so as to avoid having
--- to litter the calling code with 'I.unInterval'.
-_memset
-  :: I.Upcast LengthEndsHard CSize e a
-  => Ptr Word8 -- ^ dst
-  -> Word8     -- ^ value
-  -> I.Interval e a
-  -> IO ()
-_memset dst value len =
-  c_memset dst value $
-    I.unInterval (I.upcast len :: I.Interval LengthEndsHard CSize)
-
--- | Like 'plusPtr', except it takes an 'Interval' so as to avoid having
--- to litter the calling code with 'I.unInterval'.
-_plusPtr
-  :: I.Upcast (I.TypeEnds Int) Int e a
-  => Ptr x -- ^ ptr
-  -> I.Interval e a -- ^ diff
-  -> Ptr x
-_plusPtr p d = plusPtr p (I.unInterval' (I.upcast d :: I.TypeInterval Int))
-
---------------------------------------------------------------------------------
-
 -- | Encode @a@ as base-16. 'Nothing' if result doesn't fit in @b@.
 toBase16 :: (Peek a, Alloc b) => a -> Maybe b
 toBase16 = \bin -> do
-  b16L <- I.intervalFrom' (I.unInterval' (length bin) * 2 :: Integer)
+  b16L <- intervalFrom (2 * intervalInteger (length bin))
   pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
          peek bin $ \binP -> do
-           ret <- c_by_to_base16 b16P (I.unInterval' b16L) binP
-           when (ret /= 0) $ fail "toBase16: unexpected internal error"
+           ret <- c_by_to_base16 b16P (intervalCSize b16L) binP
+           when (ret /= 0) $ fail "By.toBase16: unexpected internal error"
 
 -- | Encode @a@ as base-16. The result is known to fit in @b@.
 toBase16N
  :: forall a b
  .  ( Peek a
     , Alloc b
-    , MinLength b <= MinLength a GHC.TypeNats.* 2
-    , MaxLength a GHC.TypeNats.* 2 <= MaxLength b )
+    , MinLength b <= MinLength a * 2
+    , MaxLength a * 2 <= MaxLength b )
  => a
  -> b
-toBase16N = fromMaybe (error "toBase16N: impossible") . toBase16
+toBase16N = fromMaybe (error "By.toBase16N: impossible") . toBase16
 
 fromBase16 :: forall a b. (Peek a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
   let b16L = length b16
-  binL <- case divMod (I.unInterval b16L) 2 of
-            (d, 0) -> I.intervalFrom d
+  binL <- case divMod (intervalInt b16L) 2 of
+            (d, 0) -> intervalFrom d
             _      -> Nothing
   let (bin, ret) = unsafeAllocFreeze binL $ \binP ->
                    peek b16 $ \b16P ->
-                   c_by_from_base16 binP b16P (I.unInterval' b16L)
+                   c_by_from_base16 binP b16P (intervalCSize b16L)
   guard (ret == 0)
   Just bin
 
