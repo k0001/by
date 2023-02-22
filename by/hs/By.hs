@@ -524,7 +524,9 @@ withSized
   .  GetLength t
   => t
   -> (forall len
-        .  KnownLength (Sized len t)
+        .  ( KnownLength (Sized len t)
+           , MinLength t <= len
+           , len <= MaxLength t )
         => Sized len t
         -> a)
   -> a
