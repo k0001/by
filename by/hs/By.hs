@@ -81,6 +81,9 @@ module By {--}
   , MaxInt
   , Interval
   , interval
+  , intervalMin
+  , intervalMax
+  , intervalSingle
   , intervalFrom
   , intervalUpcast
   , intervalDowncast
@@ -188,6 +191,24 @@ interval
   .  (KnownNat n, l <= n, n <= r, r <= MaxInt)
   => Interval l r
 interval = UnsafeInterval (fromIntegral (natVal (Proxy @n)))
+
+intervalMin
+  :: forall l r
+  .  (KnownNat l, l <= r, r <= By.MaxInt)
+  => By.Interval l r
+intervalMin = By.interval @l
+
+intervalMax
+  :: forall l r
+  .  (KnownNat r, l <= r, r <= By.MaxInt)
+  => By.Interval l r
+intervalMax = By.interval @r
+
+intervalSingle
+  :: forall n
+  .  (KnownNat n, n <= By.MaxInt)
+  => By.Interval n n
+intervalSingle = By.interval @n
 
 intervalFrom
   :: forall n l r
