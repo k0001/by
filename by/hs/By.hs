@@ -97,6 +97,9 @@ module By {--}
 where
 
 import Control.Monad
+import Data.Binary qualified as Bin
+import Data.Binary.Get qualified as Bin
+import Data.Binary.Put qualified as Bin
 import Data.ByteString qualified as B
 import Data.ByteString.Internal qualified as BI
 import Data.Char (chr)
@@ -512,6 +515,12 @@ instance
   alloc l g = do
     (t, a) <- alloc (intervalUpcast l) g
     pure (Sized t, a)
+
+instance KnownLength (Sized len B.ByteString)
+  => Bin.Binary (Sized len B.ByteString) where
+  put (Sized t) = Bin.putByteString t
+  get = Sized <$> Bin.getByteString
+                        (intervalInt (lengthN @(Sized len B.ByteString)))
 
 unSized :: Sized len t -> t
 unSized = coerce

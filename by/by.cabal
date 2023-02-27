@@ -32,7 +32,7 @@ library
   c-sources: c/by.c
   include-dirs: c/
   exposed-modules: By
-  build-depends: ghc-prim
+  build-depends: binary
 
 test-suite test
   import: basic
