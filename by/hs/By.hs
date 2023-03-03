@@ -36,10 +36,8 @@ module By {--}
   , allocN
   , unsafeAllocFreezeN
 
-    -- * Peek & Poke
-  , Peek (..)
-  , Poke
-  , poke
+    -- * Access
+  , Access (..)
 
     -- * Sized
   , Sized
@@ -60,6 +58,7 @@ module By {--}
   , pack
   , unpack
   , shows
+  , showString
   , showsBase16N
   , copy
   , copyN
@@ -118,9 +117,10 @@ import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
-import Foreign.Storable qualified as Sto
+import Foreign.Storable
 import GHC.TypeNats
-import Prelude hiding (concat, length, replicate, shows)
+import Prelude hiding (concat, length, replicate, shows, showString)
+import Prelude qualified
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -269,15 +269,11 @@ lengthN = interval @(Length t)
 -- | Raw byte access for read-only purposes.
 --
 -- __WARNING__ The “read-only” part is not enforced anywhere. Be careful.
-class GetLength t => Peek t where
-  peek :: t -> (Ptr p -> IO a) -> IO a
+class GetLength t => Access t where
+  access :: t -> (Ptr p -> IO a) -> IO a
 
 -- | Raw byte access for read-write purposes.
-class Peek t => Poke t
-
-poke :: Poke t => t -> (Ptr p -> IO a) -> IO a
-poke = peek
-{-# INLINE poke #-}
+class Access t => Poke t
 
 -- | Arbitrary byte length allocation and initialization.
 class GetLength t => Alloc t where
@@ -326,18 +322,18 @@ replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
 replicateN = replicate (lengthN @a)
 
 -- | @'copy' a@ copies all of @a@ into a different memory address, if it fits.
-copy :: forall a b. (Peek a, Alloc b) => a -> Maybe b
+copy :: forall a b. (Access a, Alloc b) => a -> Maybe b
 copy a = do
    bL <- intervalDowncast (length a)
    pure $ fst $
           unsafeAllocFreeze bL $ \bP ->
-          peek a $ \aP ->
+          access a $ \aP ->
           c_memcpy bP aP (intervalCSize bL)
 
 -- | @'copyN' a@ copies all of @a@ into a different memory address.
 copyN
   :: forall a b
-  .  ( Peek a
+  .  ( Access a
      , Alloc b
      , MinLength b <= MinLength a
      , MaxLength a <= MaxLength b )
@@ -346,15 +342,15 @@ copyN
 copyN a =
   let aL = length a
   in  fst $ unsafeAllocFreeze (intervalUpcast aL) $ \bP ->
-      peek a $ \aP ->
+      access a $ \aP ->
       c_memcpy bP aP (intervalCSize aL)
 
 
 -- | @'append' a b@ concatenates @a@ and @b@, in that order.
 append
   :: forall a b c
-  .  ( Peek a
-     , Peek b
+  .  ( Access a
+     , Access b
      , Alloc c
      , MinLength c <= MinLength a + MinLength b
      , MaxLength a + MaxLength b <= MaxLength c )
@@ -364,8 +360,8 @@ append
 append a b =
     fst $
     unsafeAllocFreeze cL $ \cP ->
-    peek a $ \aP ->
-    peek b $ \bP -> do
+    access a $ \aP ->
+    access b $ \bP -> do
       void $ c_memcpy cP aP (intervalCSize aL)
       void $ c_memcpy (plusPtr cP (intervalInt aL)) bP (intervalCSize bL)
   where
@@ -383,7 +379,7 @@ append a b =
 -- The resulting parts are copies independent from @a@.
 splitAtN
   :: forall a b c
-  .  ( Peek a
+  .  ( Access a
      , Alloc b
      , Alloc c
      , KnownLength b
@@ -396,14 +392,14 @@ splitAtN =
       cL = lengthN @c
   in \a -> unsafeAllocFreezeN $ \bP ->
            fmap fst $ allocN $ \cP ->
-           peek a $ \aP -> do
+           access a $ \aP -> do
              void $ c_memcpy bP aP (intervalCSize bL)
              c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
 
 -- | @'takeN' a@ copies the leading part of @a@ of known length.
 takeN
   :: forall a b.
-     ( Peek a
+     ( Access a
      , Alloc b
      , KnownLength b
      , Length b <= Length a )
@@ -412,13 +408,13 @@ takeN
 takeN =
   let bL = lengthN @b
   in  \a -> fst $ unsafeAllocFreezeN $ \bP ->
-                  peek a $ \aP ->
+                  access a $ \aP ->
                   c_memcpy bP aP (intervalCSize bL)
 
 -- | @'takeN' a@ copies the trailing part of @a@ of known length.
 dropN
   :: forall a b.
-     ( Peek a
+     ( Access a
      , Alloc b
      , KnownLength a
      , KnownLength b
@@ -427,7 +423,7 @@ dropN
   -> b
 dropN = \a ->
     fst $ unsafeAllocFreezeN $ \bP ->
-          peek a $ \aP ->
+          access a $ \aP ->
           c_memcpy bP (plusPtr aP pL') (intervalCSize bL)
   where
     aL = lengthN @a
@@ -445,31 +441,37 @@ pack ws = do
                   ws
 
 {-# NOINLINE unpack #-}
-unpack :: Peek a => a -> [Word8]
-unpack a = unsafeDupablePerformIO $ peek a (f (intervalInt (length a)))
+unpack :: Access a => a -> [Word8]
+unpack a = unsafeDupablePerformIO $ access a (f (intervalInt (length a)))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
     f 0 !_ = pure []
-    f n  p = do !x <- Sto.peek p
+    f n  p = do !x <- peek p
                 !xs <- f (n - 1) (plusPtr p 1)
                 pure (x : xs)
 
--- | Renders @a@ as a literal 'String'.
-shows :: Peek a => a -> ShowS
-shows = showString . fmap (chr . fromIntegral) . unpack
+-- | Renders @a@ as a literal 'String'. This behaves like
+-- "Prelude"''s 'Prelude.shows'.
+shows :: Access a => a -> ShowS
+shows = Prelude.shows . fmap (chr . fromIntegral) . unpack
+
+-- | Renders @a@ as a literal 'String'. This behaves like
+-- "Prelude"''s 'Prelude.showString'.
+showString :: Access a => a -> ShowS
+showString = Prelude.showString . fmap (chr . fromIntegral) . unpack
 
 -- | Encodes @a@ using Base-16 encoding and then renders it as a 'String'.
-showsBase16N :: forall a. (Peek a, MaxLength a * 2 <= MaxInt) => a -> ShowS
+showsBase16N :: forall a. (Access a, MaxLength a * 2 <= MaxInt) => a -> ShowS
 showsBase16N = case zeroLe @(MinLength a * 2) of
-    Dict -> shows @B.ByteString . toBase16N
+    Dict -> showString @B.ByteString . toBase16N
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
-concat :: forall a b. (Peek a, Alloc b) => [a] -> Maybe b
+concat :: forall a b. (Access a, Alloc b) => [a] -> Maybe b
 concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
   bL <- intervalFrom $ F.sum $ fmap (intervalInteger . length) as
   Just $ fst $ unsafeAllocFreeze bL $ \outP ->
-         F.foldlM (\off a -> peek a $ \aP -> do
+         F.foldlM (\off a -> access a $ \aP -> do
                       let aL = length a
                       void $ c_memcpy (plusPtr outP off) aP (intervalCSize aL)
                       pure $! off + intervalInt aL)
@@ -479,8 +481,8 @@ concat as = do
 --------------------------------------------------------------------------------
 
 -- | Interpreted as 'nullPtr'.
-instance Peek () where
-  peek _ g = g nullPtr
+instance Access () where
+  access _ g = g nullPtr
 
 instance GetLength () where
   type MinLength () = 0
@@ -495,10 +497,10 @@ newtype Sized (len :: Natural) t = Sized t
 deriving newtype instance {-# OVERLAPPABLE #-} Eq t => Eq (Sized len t)
 deriving newtype instance {-# OVERLAPPABLE #-} Ord t => Ord (Sized len t)
 
-deriving newtype instance (GetLength (Sized len t), Peek t)
-  => Peek (Sized len t)
+deriving newtype instance (GetLength (Sized len t), Access t)
+  => Access (Sized len t)
 
-deriving newtype instance (Peek (Sized len t), Poke t)
+deriving newtype instance (Access (Sized len t), Poke t)
   => Poke (Sized len t)
 
 instance (KnownNat len, MinLength t <= len, len <= MaxLength t, len <= MaxInt)
@@ -663,14 +665,14 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
   encodeH
     :: forall h. (Alloc h, MinLength h <= Size a, Size a <= MaxLength h)
     => a -> h
-  -- | Default implementation in case there is a @'Sto.Storable' a@ instance.
+  -- | Default implementation in case there is a @'Storable' a@ instance.
   default encodeH
     :: forall h
-    .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Sto.Storable a)
+    .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Storable a)
     => a -> h
   encodeH = fst
           . unsafeAllocFreeze (interval @(Size a))
-          . flip Sto.poke
+          . flip poke
 
   -- | Writes @a@ in @le@ using Litle-Endian encoding.
   encodeLE
@@ -685,19 +687,19 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
   encodeBE = encodeH . unTagged . hToBE
 
   -- | Reads @a@ from @h@ using the host encoding.
-  decodeH :: forall h. (Peek h, Size a ~ Length h) => h -> a
-  -- | Default implementation in case there is a @'Sto.Storable' a@ instance.
+  decodeH :: forall h. (Access h, Size a ~ Length h) => h -> a
+  -- | Default implementation in case there is a @'Storable' a@ instance.
   default decodeH
-    :: forall h. (Peek h, Size a ~ Length h, Sto.Storable a) => h -> a
-  decodeH h = unsafeDupablePerformIO $ peek h Sto.peek
+    :: forall h. (Access h, Size a ~ Length h, Storable a) => h -> a
+  decodeH h = unsafeDupablePerformIO $ access h peek
   {-# NOINLINE decodeH #-}
 
   -- | Reads @a@ from @le@ using Little-Endian encoding.
-  decodeLE :: forall le. (Peek le, Size a ~ Length le) => le -> a
+  decodeLE :: forall le. (Access le, Size a ~ Length le) => le -> a
   decodeLE = leToH . Tagged . decodeH
 
   -- | Reads @a@ from @be@ using Big-Endian encoding.
-  decodeBE :: forall be. (Peek be, Size a ~ Length be) => be -> a
+  decodeBE :: forall be. (Access be, Size a ~ Length be) => be -> a
   decodeBE = beToH . Tagged . decodeH
 
 instance Endian Word8 where
@@ -814,7 +816,7 @@ le64toh = id
 -- Returns a copy.
 padLeftN
   :: forall a b
-  .  ( Peek a
+  .  ( Access a
      , Alloc b
      , KnownLength b
      , MaxLength a <= Length b )
@@ -824,7 +826,7 @@ padLeftN
 padLeftN w a =
   fst $
   unsafeAllocFreezeN $ \bP ->
-  peek a $ \aP -> do
+  access a $ \aP -> do
     let bL = lengthN @b
         aL = length a
         dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
@@ -835,7 +837,7 @@ padLeftN w a =
 -- Returns a copy.
 padRightN
   :: forall a b
-  .  ( Peek a
+  .  ( Access a
      , Alloc b
      , KnownLength b
      , MaxLength a <= Length b )
@@ -845,7 +847,7 @@ padRightN
 padRightN w a =
   fst $
   unsafeAllocFreezeN $ \bP ->
-  peek a $ \aP -> do
+  access a $ \aP -> do
     let aL = length a
         bL = lengthN @b
         dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
@@ -861,8 +863,8 @@ instance GetLength B.ByteString where
          . intervalFrom
          . B.length
 
-instance Peek B.ByteString where
-  peek bs g = do
+instance Access B.ByteString where
+  access bs g = do
     let (fp, off, _len) = BI.toForeignPtr bs
     withForeignPtr fp $ \p -> g $! plusPtr p off
 
@@ -876,18 +878,18 @@ instance Alloc B.ByteString where
 --------------------------------------------------------------------------------
 
 -- | Encode @a@ as base-16. 'Nothing' if result doesn't fit in @b@.
-toBase16 :: (Peek a, Alloc b) => a -> Maybe b
+toBase16 :: (Access a, Alloc b) => a -> Maybe b
 toBase16 = \bin -> do
   b16L <- intervalFrom (2 * intervalInteger (length bin))
   pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
-         peek bin $ \binP -> do
+         access bin $ \binP -> do
            ret <- c_by_to_base16 b16P (intervalCSize b16L) binP
            when (ret /= 0) $ fail "By.toBase16: unexpected internal error"
 
 -- | Encode @a@ as base-16. The result is known to fit in @b@.
 toBase16N
  :: forall a b
- .  ( Peek a
+ .  ( Access a
     , Alloc b
     , MinLength b <= MinLength a * 2
     , MaxLength a * 2 <= MaxLength b )
@@ -895,14 +897,14 @@ toBase16N
  -> b
 toBase16N = fromMaybe (error "By.toBase16N: impossible") . toBase16
 
-fromBase16 :: forall a b. (Peek a, Alloc b) => a -> Maybe b
+fromBase16 :: forall a b. (Access a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
   let b16L = length b16
   binL <- case divMod (intervalInt b16L) 2 of
             (d, 0) -> intervalFrom d
             _      -> Nothing
   let (bin, ret) = unsafeAllocFreeze binL $ \binP ->
-                   peek b16 $ \b16P ->
+                   access b16 $ \b16P ->
                    c_by_from_base16 binP b16P (intervalCSize b16L)
   guard (ret == 0)
   Just bin
