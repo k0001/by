@@ -1,2 +1,6 @@
-compiler: ghc
-packages: */*.cabal
+profiling: True
+profiling-detail: all-functions
+optimization: True
+documentation: True
+tests: True
+packages: ./
