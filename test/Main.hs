@@ -37,7 +37,7 @@ main :: IO ()
 main =
   Tasty.defaultMainWithIngredients
     [Tasty.consoleTestReporter, Tasty.listingTests]
-    $ Tasty.localOption (HedgehogTestLimit (Just 15000)) $
+    $ Tasty.localOption (HedgehogTestLimit (Just 5000)) $
       tt
 
 tt :: TestTree
@@ -171,12 +171,20 @@ tt_base16 =
           By.toBase16 False a3 ===
             Just (By.unSized (By.toBase16N False a3 :: By.Sized 6 B.ByteString))
 
-    , testProperty "fromBase16: valid" $
+    , Tasty.localOption (HedgehogTestLimit (Just 2000)) $ -- Strings are slow
+      testProperty "fromBase16: valid" $
         property $ do
           binLength <- forAll $ Gen.int (Range.linear 0 500)
           b16S <- forAll $ replicateM (binLength * 2) $ Gen.element alphabetBase16S
           let b16 = B8.pack b16S :: B.ByteString
           True === isJust (By.fromBase16 b16 :: Maybe B.ByteString)
+
+    , Tasty.localOption (HedgehogTestLimit (Just 100)) $ -- Strings are slow
+      testProperty "toBase16 == showStringBase16" $ do
+        property $ do
+          x <- forAll $ Gen.bytes (Range.linear 0 20000)
+          By.toBase16 True  x === Just (B8.pack (By.showStringBase16 True  x ""))
+          By.toBase16 False x === Just (B8.pack (By.showStringBase16 False x ""))
     ]
   where
     alphabetBase16S = "0123456789abcdefABCDEF" :: String

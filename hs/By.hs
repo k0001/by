@@ -58,14 +58,14 @@ module By {--}
   , toBase16N
   , fromBase16
   , base16Impl
-
+  , Base16Impl
 
     -- * Utils
   , pack
   , unpack
   , shows
   , showString
-  , showsBase16N
+  , showStringBase16
   , copy
   , copyN
   , replicate
@@ -74,8 +74,11 @@ module By {--}
   , padRightN
   , append
   , appendN
+  , take
   , takeN
+  , drop
   , dropN
+  , splitAt
   , splitAtN
   , concat
 
@@ -91,6 +94,7 @@ module By {--}
   , intervalMax
   , intervalSingle
   , intervalFrom
+  , intervalClamp
   , intervalUpcast
   , intervalDowncast
   , intervalInt
@@ -116,6 +120,7 @@ import Data.Foldable qualified as F
 import Data.Int
 import Data.Kind
 import Data.Maybe (fromMaybe)
+import Data.Ord
 import Data.Proxy
 import Data.Tagged
 import Data.Type.Ord
@@ -126,7 +131,8 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import Foreign.Storable
 import GHC.TypeNats
-import Prelude hiding (concat, length, replicate, shows, showString)
+import Prelude hiding (concat, length, replicate, shows, showString, take, drop,
+  splitAt)
 import Prelude qualified
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
@@ -204,36 +210,47 @@ interval = UnsafeInterval (fromIntegral (natVal (Proxy @n)))
 
 intervalMin
   :: forall l r
-  .  (KnownNat l, l <= r, r <= By.MaxInt)
-  => By.Interval l r
-intervalMin = By.interval @l
+  .  (KnownNat l, l <= r, r <= MaxInt)
+  => Interval l r
+intervalMin = interval @l
 
 intervalMax
   :: forall l r
-  .  (KnownNat r, l <= r, r <= By.MaxInt)
-  => By.Interval l r
-intervalMax = By.interval @r
+  .  (KnownNat r, l <= r, r <= MaxInt)
+  => Interval l r
+intervalMax = interval @r
 
 intervalSingle
   :: forall n
-  .  (KnownNat n, n <= By.MaxInt)
-  => By.Interval n n
-intervalSingle = By.interval @n
+  .  (KnownNat n, n <= MaxInt)
+  => Interval n n
+intervalSingle = interval @n
+
+intervalClamp
+  :: forall n l r
+  .  (Integral n, KnownNat l, KnownNat r, l <= r, r <= MaxInt)
+  => n
+  -> Interval l r
+intervalClamp =
+    UnsafeInterval . fromIntegral . clamp (l, r) . fromIntegral
+  where
+    l = natVal (Proxy @l) :: Natural
+    r = natVal (Proxy @r) :: Natural
 
 intervalFrom
   :: forall n l r
   .  (Integral n, KnownNat l, KnownNat r)
   => n
   -> Maybe (Interval l r)
-intervalFrom = \i -> do
-    let n :: Natural = fromIntegral i
+intervalFrom = \i0 -> do
+    let i1 = toInteger i0
     -- We check (l <= r) and (r <= z) here so as to keep constraints simpler.
-    guard (l <= n && n <= r && r <= z)
-    pure (UnsafeInterval (fromIntegral i))
+    guard (l <= i1 && i1 <= r && r <= z)
+    pure (UnsafeInterval (fromIntegral i0))
   where
-    l = natVal (Proxy @l)
-    r = natVal (Proxy @r)
-    z = natVal (Proxy @MaxInt)
+    l = toInteger (natVal (Proxy @l))
+    r = toInteger (natVal (Proxy @r))
+    z = toInteger (natVal (Proxy @MaxInt))
 
 --------------------------------------------------------------------------------
 
@@ -462,6 +479,28 @@ appendN a b =
        = interval @cL
        | otherwise = error "By.append: impossible"
 
+-- | @'splitAt' n a@ copies the @n@ leading bytes of @a@ into a newly
+-- allocated @b@, and the trailing @'length' a - n@ bytes of @a@
+-- into @b@, if they would fit.
+splitAt
+  :: forall a b c
+  .  ( Access a
+     , Alloc b
+     , Alloc c )
+  => LengthInterval a
+  -> a
+  -> Maybe (b, c)
+splitAt bLa a = do
+  let aL :: LengthInterval a = length a
+  bL :: LengthInterval b <- intervalDowncast bLa
+  cL :: LengthInterval c <- intervalFrom $ intervalInteger aL
+                                         - intervalInteger bL
+  pure $ unsafeAlloc bL $ \bP ->
+         alloc_ cL $ \cP ->
+         access a $ \aP -> do
+           void $ c_memcpy bP aP (intervalCSize bL)
+           c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
+
 -- | @'splitAtN' a@ splits @a@ into two parts of known lengths.
 --
 -- The resulting parts are copies independent from @a@.
@@ -484,7 +523,25 @@ splitAtN =
              void $ c_memcpy bP aP (intervalCSize bL)
              c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
 
--- | @'takeN' a@ copies the leading part of @a@ of known length.
+-- | @'take' n a@ copies the @n@ leading bytes of @a@ into a
+-- newly allocated @b@, if it would fit.
+take
+  :: forall a b.
+     ( Access a
+     , Alloc b )
+  => LengthInterval a
+  -> a
+  -> Maybe b
+take bLa a = do
+  let aL :: LengthInterval a = length a
+  guard (bLa <= aL)
+  bL :: LengthInterval b <- intervalDowncast bLa
+  pure $ unsafeAlloc_ bL $ \bP ->
+         access a $ \aP ->
+         c_memcpy bP aP (intervalCSize bL)
+
+-- | @'dropN' a@ copies the leading bytes of @a@ into a
+-- newly allocated @b@ of known length.
 takeN
   :: forall a b.
      ( Access a
@@ -499,7 +556,26 @@ takeN =
             access a $ \aP ->
             c_memcpy bP aP (intervalCSize bL)
 
--- | @'takeN' a@ copies the trailing part of @a@ of known length.
+-- | @'drop' n a@ copies the @n@ trailing bytes of @a@ into a newly
+-- allocated @b@, if it would fit.
+drop
+  :: forall a b.
+     ( Access a
+     , Alloc b )
+  => LengthInterval a
+  -> a
+  -> Maybe b
+drop bLa a = do
+  let aL :: LengthInterval a = length a
+  guard (bLa <= aL)
+  bL :: LengthInterval b <- intervalDowncast bLa
+  let dL' :: Int = intervalInt aL - intervalInt bL
+  pure $ unsafeAlloc_ bL $ \bP ->
+         access a $ \aP ->
+         c_memcpy bP (plusPtr aP dL') (intervalCSize bL)
+
+-- | @'dropN' a@ copies the trailing bytes of @a@ into a
+-- newly allocated @b@ of known length.
 dropN
   :: forall a b.
      ( Access a
@@ -518,7 +594,8 @@ dropN = \a ->
     bL = lengthN @b
     pL' = intervalInt aL - intervalInt bL
 
--- | 'Nothing' if the result doesn't fit in @a@.
+-- | Allocate a new @a@ made up of the bytes in @f@.
+-- 'Nothing' if the result wouldn't fit in @a@.
 pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
 pack ws = do
   aL <- intervalFrom (F.length ws)
@@ -528,8 +605,9 @@ pack ws = do
                   0
                   ws
 
-{-# NOINLINE unpack #-}
+-- | List of bytes in @a@.
 unpack :: Access a => a -> [Word8]
+{-# NOINLINE unpack #-}
 unpack a = unsafeDupablePerformIO $ access a (f (intervalInt (length a)))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
@@ -550,20 +628,30 @@ showString = Prelude.showString . fmap (chr . fromIntegral) . unpack
 
 -- | Encodes @a@ using Base-16 encoding and then renders it
 -- using 'showString'.
-showsBase16N
-  :: forall a. (Access a, MaxLength a * 2 <= MaxInt)
+showStringBase16
+  :: forall a
+  .  (Access a)
   => Bool -- Uppercase if 'True'.
   -> a
   -> ShowS
-showsBase16N u = case zeroLe @(MinLength a * 2) of
-  Dict -> showString @B.ByteString . toBase16N u
+showStringBase16 u a
+  | Just aB16 <- toBase16 u a
+      = showString (aB16 :: B.ByteString)
+  | Just (b, c) <- splitAt bLa a
+  , Just bB16 <- toBase16 u (b :: B.ByteString)
+      = showString (bB16 :: B.ByteString)
+      . showStringBase16 u (c :: B.ByteString)
+  | otherwise = error "showsStringBase16: impossible"
+  where
+    bLa :: LengthInterval a
+    bLa = intervalClamp (4096 :: Int)
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
-concat :: forall a b. (Access a, Alloc b) => [a] -> Maybe b
+concat :: forall a b f. (Access a, Alloc b, Foldable f) => f a -> Maybe b
 concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
-  bL <- intervalFrom $ F.sum $ fmap (intervalInteger . length) as
-  Just $ unsafeAlloc_ bL $ \outP ->
+  bL <- intervalFrom $ F.foldl' (\ !z a -> z + intervalInteger (length a)) 0 as
+  pure $ unsafeAlloc_ bL $ \outP ->
          F.foldlM (\off a -> access a $ \aP -> do
                       let aL = length a
                       void $ c_memcpy (plusPtr outP off) aP (intervalCSize aL)
