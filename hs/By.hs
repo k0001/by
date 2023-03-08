@@ -32,12 +32,17 @@ module By {--}
 
     -- * Allocation
   , Alloc (..)
-  , unsafeAllocFreeze
+  , alloc_
+  , unsafeAlloc
+  , unsafeAlloc_
   , allocN
-  , unsafeAllocFreezeN
+  , allocN_
+  , unsafeAllocN
+  , unsafeAllocN_
 
     -- * Access
   , Access (..)
+  , unsafeAccess
 
     -- * Sized
   , Sized
@@ -68,6 +73,7 @@ module By {--}
   , padLeftN
   , padRightN
   , append
+  , appendN
   , takeN
   , dropN
   , splitAtN
@@ -271,67 +277,129 @@ lengthN = interval @(Length t)
 --
 -- __WARNING__ The “read-only” part is not enforced anywhere. Be careful.
 class GetLength t => Access t where
-  access :: t -> (Ptr p -> IO a) -> IO a
+  access :: t -> (Ptr Word8 -> IO a) -> IO a
 
--- | Raw byte access for read-write purposes.
-class Access t => Poke t
+-- | Like 'access', but “pure”. This is safe as long as the
+-- passed in function only interacts with the 'length' bytes
+-- starting at the given 'Ptr' in a read-only manner.
+unsafeAccess
+  :: Access t
+  => t
+  -> (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> a
+unsafeAccess t g = unsafePerformIO (access t g)
+{-# NOINLINE unsafeAccess #-}
 
 -- | Arbitrary byte length allocation and initialization.
 class GetLength t => Alloc t where
   alloc :: LengthInterval t
-        -> (Ptr p -> IO a)
-        -- ^ Iitialization procedure for 'length'
+        -> (Ptr Word8 -> IO a)
+        -- ^ Initialization procedure for 'length'
         -- bytes starting at the given 'Ptr'.
         -> IO (t, a)
+
+-- | Like 'allocN', but the output from the initialization
+-- procedure is discarded.
+alloc_
+  :: forall t a
+  .  (Alloc t)
+  => LengthInterval t
+  -> (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> IO t
+alloc_ n = fmap fst . alloc n
+
+-- | Like 'allocN', but the output from the initialization
+-- procedure is discarded.
+allocN_
+  :: forall t a
+  .  (Alloc t, KnownLength t)
+  => (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> IO t
+allocN_ = fmap fst . allocN
+
+-- | Fixed byte length allocation and initialization.
+allocN
+  :: forall t a
+  .  (Alloc t, KnownLength t)
+  => (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> IO (t, a)
+allocN = alloc (lengthN @t)
 
 -- | Like 'alloc', but “pure”. This is safe as long as the
 -- initialization procedure only interacts with the 'length'
 -- bytes starting at the given 'Ptr'.
-unsafeAllocFreeze
-  :: Alloc t
+unsafeAlloc
+  :: forall t a
+  .  Alloc t
   => LengthInterval t -- ^ 'length'.
-  -> (Ptr p -> IO a)
+  -> (Ptr Word8 -> IO a)
   -- ^ Initialization procedure for 'length'
   -- bytes starting at the given 'Ptr'.
   -> (t, a)
-unsafeAllocFreeze len g = unsafePerformIO (alloc len g)
-{-# NOINLINE unsafeAllocFreeze #-}
+unsafeAlloc len g = unsafePerformIO (alloc len g)
+{-# NOINLINE unsafeAlloc #-}
 
--- | @'replicate' n x@ repeats @n@ times the byte @x@.
-replicate :: Alloc a => LengthInterval a -> Word8 -> a
-replicate len x = fst $ unsafeAllocFreeze len $ \p ->
-                        c_memset p x (intervalCSize len)
-
--- | Fixed byte length allocation and initialization.
-allocN :: forall t p a. (Alloc t, KnownLength t) => (Ptr p -> IO a) -> IO (t, a)
-allocN = alloc (lengthN @t)
+-- | Like 'unsafeAlloc', but the output from the initialization
+-- procedure is discarded.
+unsafeAlloc_
+  :: forall t a
+  .  Alloc t
+  => LengthInterval t -- ^ 'length'.
+  -> (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for 'length'
+  -- bytes starting at the given 'Ptr'.
+  -> t
+unsafeAlloc_ len g = fst (unsafeAlloc len g)
 
 -- | Like 'allocN', but “pure”. This is safe as long as the
 -- initialization procedure only interacts with @'Length' t@
 -- bytes starting at the given 'Ptr'.
-unsafeAllocFreezeN
-  :: (Alloc t, KnownLength t)
-  => (Ptr p -> IO a)
+unsafeAllocN
+  :: forall t a
+  .  (Alloc t, KnownLength t)
+  => (Ptr Word8 -> IO a)
   -- ^ Initialization procedure for @'Length' t@
   -- bytes starting at the given 'Ptr'.
   -> (t, a)
-unsafeAllocFreezeN g = unsafePerformIO (allocN g)
-{-# NOINLINE unsafeAllocFreezeN #-}
+unsafeAllocN = unsafeAlloc (lengthN @t)
+
+-- | Like 'unsafeAllocN', but the output from the initialization
+-- procedure is discarded.
+unsafeAllocN_
+  :: forall t a
+  .  (Alloc t, KnownLength t)
+  => (Ptr Word8 -> IO a)
+  -- ^ Initialization procedure for @'Length' t@
+  -- bytes starting at the given 'Ptr'.
+  -> t
+unsafeAllocN_ g = fst (unsafeAllocN g)
+
+-- | @'replicate' n x@ repeats @n@ times the byte @x@.
+replicate :: Alloc a => LengthInterval a -> Word8 -> a
+replicate len x = unsafeAlloc_ len $ \p ->
+                  c_memset p x (intervalCSize len)
 
 -- | @'replicate' x@ repeats @'Length' a@ times the byte @x@.
 replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
 replicateN = replicate (lengthN @a)
 
--- | @'copy' a@ copies all of @a@ into a different memory address, if it fits.
+-- | @'copyN' a@ copies all of @a@ into a newly allocated @b@, if it would fit.
 copy :: forall a b. (Access a, Alloc b) => a -> Maybe b
 copy a = do
    bL <- intervalDowncast (length a)
-   pure $ fst $
-          unsafeAllocFreeze bL $ \bP ->
+   pure $ unsafeAlloc_ bL $ \bP ->
           access a $ \aP ->
           c_memcpy bP aP (intervalCSize bL)
 
--- | @'copyN' a@ copies all of @a@ into a different memory address.
+-- | @'copyN' a@ copies all of @a@ into a newly allocated @b@.
 copyN
   :: forall a b
   .  ( Access a
@@ -342,13 +410,33 @@ copyN
   -> b
 copyN a =
   let aL = length a
-  in  fst $ unsafeAllocFreeze (intervalUpcast aL) $ \bP ->
+  in  unsafeAlloc_ (intervalUpcast aL) $ \bP ->
       access a $ \aP ->
       c_memcpy bP aP (intervalCSize aL)
 
-
--- | @'append' a b@ concatenates @a@ and @b@, in that order.
+-- | @'append' a b@ allocates a new @c@ that contains the concatenation of
+-- @a@ and @b@, in that order, if it would fit in @c@.
 append
+  :: forall a b c
+  .  ( Access a
+     , Access b
+     , Alloc c )
+  => a
+  -> b
+  -> Maybe c
+append a b = do
+  let aL = length a
+      bL = length b
+  cL <- intervalFrom (intervalInteger aL + intervalInteger bL)
+  pure $ unsafeAlloc_ cL $ \cP ->
+         access a $ \aP ->
+         access b $ \bP -> do
+           void $ c_memcpy cP aP (intervalCSize aL)
+           void $ c_memcpy (plusPtr cP (intervalInt aL)) bP (intervalCSize bL)
+
+-- | @'append' a b@ allocates a new @c@ that contains the concatenation of
+-- @a@ and @b@, in that order.
+appendN
   :: forall a b c
   .  ( Access a
      , Access b
@@ -358,9 +446,8 @@ append
   => a
   -> b
   -> c
-append a b =
-    fst $
-    unsafeAllocFreeze cL $ \cP ->
+appendN a b =
+    unsafeAlloc_ cL $ \cP ->
     access a $ \aP ->
     access b $ \bP -> do
       void $ c_memcpy cP aP (intervalCSize aL)
@@ -391,8 +478,8 @@ splitAtN
 splitAtN =
   let bL = lengthN @b
       cL = lengthN @c
-  in \a -> unsafeAllocFreezeN $ \bP ->
-           fmap fst $ allocN $ \cP ->
+  in \a -> unsafeAllocN $ \bP ->
+           allocN_ $ \cP ->
            access a $ \aP -> do
              void $ c_memcpy bP aP (intervalCSize bL)
              c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
@@ -408,9 +495,9 @@ takeN
   -> b
 takeN =
   let bL = lengthN @b
-  in  \a -> fst $ unsafeAllocFreezeN $ \bP ->
-                  access a $ \aP ->
-                  c_memcpy bP aP (intervalCSize bL)
+  in  \a -> unsafeAllocN_ $ \bP ->
+            access a $ \aP ->
+            c_memcpy bP aP (intervalCSize bL)
 
 -- | @'takeN' a@ copies the trailing part of @a@ of known length.
 dropN
@@ -423,9 +510,9 @@ dropN
   => a
   -> b
 dropN = \a ->
-    fst $ unsafeAllocFreezeN $ \bP ->
-          access a $ \aP ->
-          c_memcpy bP (plusPtr aP pL') (intervalCSize bL)
+    unsafeAllocN_ $ \bP ->
+    access a $ \aP ->
+    c_memcpy bP (plusPtr aP pL') (intervalCSize bL)
   where
     aL = lengthN @a
     bL = lengthN @b
@@ -435,7 +522,7 @@ dropN = \a ->
 pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
 pack ws = do
   aL <- intervalFrom (F.length ws)
-  pure $ fst $ unsafeAllocFreeze aL $ \aP ->
+  pure $ unsafeAlloc_ aL $ \aP ->
          F.foldlM (\off w -> do c_memset (plusPtr aP off) w 1
                                 pure $! off + 1)
                   0
@@ -461,7 +548,8 @@ shows = Prelude.shows . fmap (chr . fromIntegral) . unpack
 showString :: Access a => a -> ShowS
 showString = Prelude.showString . fmap (chr . fromIntegral) . unpack
 
--- | Encodes @a@ using Base-16 encoding and then renders it as a 'String'.
+-- | Encodes @a@ using Base-16 encoding and then renders it
+-- using 'showString'.
 showsBase16N
   :: forall a. (Access a, MaxLength a * 2 <= MaxInt)
   => Bool -- Uppercase if 'True'.
@@ -475,7 +563,7 @@ concat :: forall a b. (Access a, Alloc b) => [a] -> Maybe b
 concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
   bL <- intervalFrom $ F.sum $ fmap (intervalInteger . length) as
-  Just $ fst $ unsafeAllocFreeze bL $ \outP ->
+  Just $ unsafeAlloc_ bL $ \outP ->
          F.foldlM (\off a -> access a $ \aP -> do
                       let aL = length a
                       void $ c_memcpy (plusPtr outP off) aP (intervalCSize aL)
@@ -504,9 +592,6 @@ deriving newtype instance {-# OVERLAPPABLE #-} Ord t => Ord (Sized len t)
 
 deriving newtype instance (GetLength (Sized len t), Access t)
   => Access (Sized len t)
-
-deriving newtype instance (Access (Sized len t), Poke t)
-  => Poke (Sized len t)
 
 instance (KnownNat len, MinLength t <= len, len <= MaxLength t, len <= MaxInt)
   => GetLength (Sized len t) where
@@ -675,9 +760,8 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
     :: forall h
     .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Storable a)
     => a -> h
-  encodeH = fst
-          . unsafeAllocFreeze (interval @(Size a))
-          . flip poke
+  encodeH = \a -> unsafeAlloc_ (interval @(Size a)) $ \p ->
+                  poke (castPtr p) a
 
   -- | Writes @a@ in @le@ using Litle-Endian encoding.
   encodeLE
@@ -696,7 +780,7 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
   -- | Default implementation in case there is a @'Storable' a@ instance.
   default decodeH
     :: forall h. (Access h, Size a ~ Length h, Storable a) => h -> a
-  decodeH h = unsafeDupablePerformIO $ access h peek
+  decodeH h = unsafeDupablePerformIO $ access h (peek . castPtr)
   {-# NOINLINE decodeH #-}
 
   -- | Reads @a@ from @le@ using Little-Endian encoding.
@@ -829,8 +913,7 @@ padLeftN
   -> a
   -> b
 padLeftN w a =
-  fst $
-  unsafeAllocFreezeN $ \bP ->
+  unsafeAllocN_ $ \bP ->
   access a $ \aP -> do
     let bL = lengthN @b
         aL = length a
@@ -850,8 +933,7 @@ padRightN
   -> a
   -> b
 padRightN w a =
-  fst $
-  unsafeAllocFreezeN $ \bP ->
+  unsafeAllocN_ $ \bP ->
   access a $ \aP -> do
     let aL = length a
         bL = lengthN @b
@@ -889,7 +971,7 @@ toBase16 :: (Access a, Alloc b)
          -> Maybe b
 toBase16 u = \bin -> do
     b16L <- intervalFrom (2 * intervalInteger (length bin))
-    pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
+    pure $ unsafeAlloc_ b16L $ \b16P ->
            access bin $ \binP ->
            f b16P binP (intervalCSize (length bin))
   where
@@ -914,7 +996,7 @@ fromBase16 b16 = do
   binL <- case divMod (intervalInt b16L) 2 of
             (d, 0) -> intervalFrom d
             _      -> Nothing
-  let (bin, ret) = unsafeAllocFreeze binL $ \binP ->
+  let (bin, ret) = unsafeAlloc binL $ \binP ->
                    access b16 $ \b16P ->
                    c_by_from_base16 binP (intervalCSize binL) b16P
   guard (ret == 0)
