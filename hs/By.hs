@@ -52,6 +52,7 @@ module By {--}
   , toBase16
   , toBase16N
   , fromBase16
+  , base16Impl
 
 
     -- * Utils
@@ -461,9 +462,13 @@ showString :: Access a => a -> ShowS
 showString = Prelude.showString . fmap (chr . fromIntegral) . unpack
 
 -- | Encodes @a@ using Base-16 encoding and then renders it as a 'String'.
-showsBase16N :: forall a. (Access a, MaxLength a * 2 <= MaxInt) => a -> ShowS
-showsBase16N = case zeroLe @(MinLength a * 2) of
-    Dict -> showString @B.ByteString . toBase16N
+showsBase16N
+  :: forall a. (Access a, MaxLength a * 2 <= MaxInt)
+  => Bool -- Uppercase if 'True'.
+  -> a
+  -> ShowS
+showsBase16N u = case zeroLe @(MinLength a * 2) of
+  Dict -> showString @B.ByteString . toBase16N u
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
 concat :: forall a b. (Access a, Alloc b) => [a] -> Maybe b
@@ -878,13 +883,18 @@ instance Alloc B.ByteString where
 --------------------------------------------------------------------------------
 
 -- | Encode @a@ as base-16. 'Nothing' if result doesn't fit in @b@.
-toBase16 :: (Access a, Alloc b) => a -> Maybe b
-toBase16 = \bin -> do
-  b16L <- intervalFrom (2 * intervalInteger (length bin))
-  pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
-         access bin $ \binP -> do
-           ret <- c_by_to_base16 b16P (intervalCSize b16L) binP
-           when (ret /= 0) $ fail "By.toBase16: unexpected internal error"
+toBase16 :: (Access a, Alloc b)
+         => Bool -- Uppercase if 'True'.
+         -> a
+         -> Maybe b
+toBase16 u = \bin -> do
+    b16L <- intervalFrom (2 * intervalInteger (length bin))
+    pure $ fst $ unsafeAllocFreeze b16L $ \b16P ->
+           access bin $ \binP ->
+           f b16P binP (intervalCSize (length bin))
+  where
+    f = if u then c_by_to_base16_upper
+             else c_by_to_base16_lower
 
 -- | Encode @a@ as base-16. The result is known to fit in @b@.
 toBase16N
@@ -893,9 +903,10 @@ toBase16N
     , Alloc b
     , MinLength b <= MinLength a * 2
     , MaxLength a * 2 <= MaxLength b )
- => a
+ => Bool -- Uppercase if 'True'.
+ -> a
  -> b
-toBase16N = fromMaybe (error "By.toBase16N: impossible") . toBase16
+toBase16N u = fromMaybe (error "By.toBase16N: impossible") . toBase16 u
 
 fromBase16 :: forall a b. (Access a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
@@ -905,7 +916,7 @@ fromBase16 b16 = do
             _      -> Nothing
   let (bin, ret) = unsafeAllocFreeze binL $ \binP ->
                    access b16 $ \b16P ->
-                   c_by_from_base16 binP b16P (intervalCSize b16L)
+                   c_by_from_base16 binP (intervalCSize binL) b16P
   guard (ret == 0)
   Just bin
 
@@ -925,16 +936,50 @@ foreign import ccall unsafe "string.h memset"
     -> CSize -- ^ len
     -> IO ()
 
-foreign import ccall unsafe "by.h by_to_base16"
-  c_by_to_base16
+foreign import ccall unsafe "by.h by_to_base16_lower"
+  c_by_to_base16_lower
     :: Ptr Word8 -- ^ base16
-    -> CSize -- ^ base16_len
     -> Ptr Word8 -- ^ bin
-    -> IO CInt
+    -> CSize -- ^ bin_len
+    -> IO ()
+
+foreign import ccall unsafe "by.h by_to_base16_upper"
+  c_by_to_base16_upper
+    :: Ptr Word8 -- ^ base16
+    -> Ptr Word8 -- ^ bin
+    -> CSize -- ^ bin_len
+    -> IO ()
 
 foreign import ccall unsafe "by.h by_from_base16"
   c_by_from_base16
     :: Ptr Word8 -- ^ bin
+    -> CSize -- ^ bin_len
     -> Ptr Word8 -- ^ base16
-    -> CSize -- ^ base16_len
     -> IO CInt
+
+--------------------------------------------------------------------------------
+
+data Base16Impl
+  = Base16Impl_Scalar
+  | Base16Impl_SSSE3
+  | Base16Impl_AVX2
+  deriving (Eq, Ord, Show, Bounded, Enum)
+
+base16Impl :: Base16Impl
+base16Impl
+  | _c_by_to_base16_upper == _c_by_to_base16_upper__scalar = Base16Impl_Scalar
+  | _c_by_to_base16_upper == _c_by_to_base16_upper__ssse3  = Base16Impl_SSSE3
+  | _c_by_to_base16_upper == _c_by_to_base16_upper__avx2   = Base16Impl_AVX2
+  | otherwise = error "base16Impl: impossible"
+{-# NOINLINE base16Impl #-}
+
+foreign import ccall unsafe "by.h &by_to_base16_upper"
+  _c_by_to_base16_upper :: Ptr a
+foreign import ccall unsafe "by.h &by_to_base16_upper__scalar"
+  _c_by_to_base16_upper__scalar :: Ptr a
+foreign import ccall unsafe "by.h &by_to_base16_upper__ssse3"
+  _c_by_to_base16_upper__ssse3 :: Ptr a
+foreign import ccall unsafe "by.h &by_to_base16_upper__avx2"
+  _c_by_to_base16_upper__avx2 :: Ptr a
+
+

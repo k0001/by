@@ -100,13 +100,13 @@ tt_cmp =
               a1   <- forAll $ genSizedByteString @1
               a2   <- forAll $ genSizedByteString @2
               a8   <- forAll $ genSizedByteString @8
-              a100 <- forAll $ genSizedByteString @8
+              a100 <- forAll $ genSizedByteString @100
 
               b0   <- forAll $ genSizedByteString @0
               b1   <- forAll $ genSizedByteString @1
               b2   <- forAll $ genSizedByteString @2
               b8   <- forAll $ genSizedByteString @8
-              b100 <- forAll $ genSizedByteString @8
+              b100 <- forAll $ genSizedByteString @100
 
               compare a0   b0   === compare (By.unSized a0)   (By.unSized b0)
               compare a1   b1   === compare (By.unSized a1)   (By.unSized b1)
@@ -120,13 +120,13 @@ tt_cmp =
               a1   <- forAll $ genSizedByteString @1
               a2   <- forAll $ genSizedByteString @2
               a8   <- forAll $ genSizedByteString @8
-              a100 <- forAll $ genSizedByteString @8
+              a100 <- forAll $ genSizedByteString @100
 
               b0   <- forAll $ genSizedByteString @0
               b1   <- forAll $ genSizedByteString @1
               b2   <- forAll $ genSizedByteString @2
               b8   <- forAll $ genSizedByteString @8
-              b100 <- forAll $ genSizedByteString @8
+              b100 <- forAll $ genSizedByteString @100
 
               (==) a0   b0   === (==) (By.unSized a0)   (By.unSized b0)
               (==) a1   b1   === (==) (By.unSized a1)   (By.unSized b1)
@@ -143,7 +143,8 @@ tt_base16 =
     [ testProperty "roundtrip" $
         property $ do
           x <- forAll $ Gen.bytes (Range.linear 0 500)
-          Just x === (By.fromBase16 =<< (By.toBase16 x :: Maybe B.ByteString))
+          Just x === (By.fromBase16 =<< (By.toBase16 True  x :: Maybe B.ByteString))
+          Just x === (By.fromBase16 =<< (By.toBase16 False x :: Maybe B.ByteString))
 
     , testProperty "toBase16 == toBase16N" $
         property $ do
@@ -152,10 +153,23 @@ tt_base16 =
           a2 <- forAll $ genSizedByteString @2
           a3 <- forAll $ genSizedByteString @3
 
-          By.toBase16 a0 === Just (By.unSized (By.toBase16N a0 :: By.Sized 0 B.ByteString))
-          By.toBase16 a1 === Just (By.unSized (By.toBase16N a1 :: By.Sized 2 B.ByteString))
-          By.toBase16 a2 === Just (By.unSized (By.toBase16N a2 :: By.Sized 4 B.ByteString))
-          By.toBase16 a3 === Just (By.unSized (By.toBase16N a3 :: By.Sized 6 B.ByteString))
+          By.toBase16 True a0 ===
+            Just (By.unSized (By.toBase16N True a0 :: By.Sized 0 B.ByteString))
+          By.toBase16 True a1 ===
+            Just (By.unSized (By.toBase16N True a1 :: By.Sized 2 B.ByteString))
+          By.toBase16 True a2 ===
+            Just (By.unSized (By.toBase16N True a2 :: By.Sized 4 B.ByteString))
+          By.toBase16 True a3 ===
+            Just (By.unSized (By.toBase16N True a3 :: By.Sized 6 B.ByteString))
+
+          By.toBase16 False a0 ===
+            Just (By.unSized (By.toBase16N False a0 :: By.Sized 0 B.ByteString))
+          By.toBase16 False a1 ===
+            Just (By.unSized (By.toBase16N False a1 :: By.Sized 2 B.ByteString))
+          By.toBase16 False a2 ===
+            Just (By.unSized (By.toBase16N False a2 :: By.Sized 4 B.ByteString))
+          By.toBase16 False a3 ===
+            Just (By.unSized (By.toBase16N False a3 :: By.Sized 6 B.ByteString))
 
     , testProperty "fromBase16: valid" $
         property $ do

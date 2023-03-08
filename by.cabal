@@ -17,22 +17,27 @@ tested-with: GHC ==9.2.5, GHC ==9.4.3
 
 common basic
   default-language: Haskell2010
-  cc-options: -Werror -Wall -Wextra -O3
   ghc-options: -O2 -Wall -Werror=incomplete-patterns
   build-depends:
-    base == 4.*,
+    base ==4.*,
     bytestring,
     constraints,
-    memzero,
     tagged,
 
 library
   import: basic
   hs-source-dirs: hs
-  c-sources: c/by.c
+  cc-options: -Werror -Wall -Wextra -O3
   include-dirs: c/
+  c-sources:
+    c/by_base16.c
+    c/by_base16__avx2.c
+    c/by_base16__scalar.c
+    c/by_base16__ssse3.c
   exposed-modules: By
-  build-depends: binary
+  build-depends:
+    binary,
+    memzero,
 
 test-suite test
   import: basic
