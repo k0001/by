@@ -53,19 +53,25 @@ module By {--}
   , withSizedMinMax
   , withSizedMinMaxN
 
+    -- * Byets
+  , Byets
+
     -- * Base16
   , toBase16
   , toBase16N
   , fromBase16
+  , showBase16
+  , showsBase16
+  , showStringBase16
   , base16Impl
   , Base16Impl(..)
 
     -- * Utils
   , pack
   , unpack
+  , show
   , shows
   , showString
-  , showStringBase16
   , copy
   , copyN
   , replicate
@@ -122,17 +128,20 @@ import Data.Kind
 import Data.Maybe (fromMaybe)
 import Data.Ord
 import Data.Proxy
+import Data.String
 import Data.Tagged
 import Data.Type.Ord
 import Data.Void
 import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
-import Foreign.ForeignPtr (withForeignPtr)
+import Foreign.ForeignPtr (ForeignPtr, withForeignPtr, newForeignPtr_)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import Foreign.Storable
+import GHC.TypeLits qualified as GHC
 import GHC.TypeNats
+import Memzero qualified
 import Prelude hiding (concat, length, replicate, shows, showString, take, drop,
-  splitAt)
+  splitAt, show)
 import Prelude qualified
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
@@ -613,6 +622,11 @@ unpack a = unsafeDupablePerformIO $ access a (f (intervalInt (length a)))
                 pure (x : xs)
 
 -- | Renders @a@ as a literal 'String'. This behaves like
+-- "Prelude"''s 'Prelude.show'.
+show :: Access a => a -> String
+show = flip shows ""
+
+-- | Renders @a@ as a literal 'String'. This behaves like
 -- "Prelude"''s 'Prelude.shows'.
 shows :: Access a => a -> ShowS
 shows = Prelude.shows . fmap (chr . fromIntegral) . unpack
@@ -621,6 +635,24 @@ shows = Prelude.shows . fmap (chr . fromIntegral) . unpack
 -- "Prelude"''s 'Prelude.showString'.
 showString :: Access a => a -> ShowS
 showString = Prelude.showString . fmap (chr . fromIntegral) . unpack
+
+-- | Encodes @a@ using Base-16 encoding and then renders it using 'show'.
+showBase16
+  :: forall a
+  .  (Access a)
+  => Bool -- Uppercase if 'True'.
+  -> a
+  -> String
+showBase16 u a = showsBase16 u a ""
+
+-- | Encodes @a@ using Base-16 encoding and then renders it using 'shows'.
+showsBase16
+  :: forall a
+  .  (Access a)
+  => Bool -- Uppercase if 'True'.
+  -> a
+  -> ShowS
+showsBase16 u a = showChar '"' . showStringBase16 u a . showChar '"'
 
 -- | Encodes @a@ using Base-16 encoding and then renders it
 -- using 'showString'.
@@ -1048,6 +1080,124 @@ instance Alloc B.ByteString where
 
 --------------------------------------------------------------------------------
 
+-- | Bytes suitable for storing sensitive information.
+--
+-- * __Memory is zeroed__ once it becomes unreachable.
+-- /The bytes say “bye”. Get it? Great name./
+--
+-- * __Constant time 'Eq'uality__ comparisson when the compared 'Byets'
+-- are of the same length.
+--
+-- * __Constant time 'Ord'ering__ when the compared 'Byets'
+-- are of the same length.
+--
+-- * __Disabled 'Show' instance__ so that you don't accidentally 'Prelude.show'
+-- secrets.
+data Byets = Byets (LengthInterval Byets) (ForeignPtr Word8)
+
+-- | The 'Show' instance for 'Byets' is explicitly __disabled__
+-- so that you don't go showing presumably secret things.
+-- If you really want this, use 'By.show' from the "By" module
+-- instead of 'Prelude.show' from the "Prelude" module.
+instance NoSuchInstance => Show Byets where show = undefined
+type family NoSuchInstance where
+  NoSuchInstance = GHC.TypeError
+    ( 'GHC.Text "The " 'GHC.:<>: 'GHC.ShowType Show 'GHC.:<>:
+      'GHC.Text " instance for " 'GHC.:<>: 'GHC.ShowType Byets 'GHC.:<>:
+      'GHC.Text " is explicitly disabled" 'GHC.:$$:
+      'GHC.Text "so that you don't go showing presumably secret things." 'GHC.:$$:
+      'GHC.Text "If you really want this, use By.show " 'GHC.:<>:
+      'GHC.Text "instead of Prelude.show." )
+
+-- | Provided only as a convenience. If the 'Byets' to concatenate
+-- add up to more than 'MaxInt', this 'error's. Notice that this is
+-- true of types like 'B.ByteString', too. Use 'concat' if you are
+-- paranoid.
+instance Semigroup Byets where
+  a <> b | length a == interval @0 = b
+         | length b == interval @0 = a
+         | otherwise = fromMaybe (error "By.Byets.(<>): too long") (append a b)
+
+-- | See the 'Semigroup' instance for 'Byets'.
+instance Monoid Byets where
+  {-# NOINLINE mempty #-}
+  mempty = unsafePerformIO $ do
+    fp <- newForeignPtr_ nullPtr
+    pure $ Byets (interval @0) fp
+  mconcat []  = mempty
+  mconcat [a] = a
+  mconcat as  = fromMaybe (error "By.Byets.mconcat: too long") (concat as)
+
+
+-- | Provided only as a convenience. While the allocated 'Byets' will be
+-- zeroed once they become unreachable, the input to 'fromString' may not.
+-- Also, the input 'Char's are silently truncated using 'BI.c2w' the same
+-- way they are in the case of the 'IsString' instance for 'B.ByteString'.
+instance IsString Byets where
+  fromString = fromMaybe (error "By.Byets.fromString: too long")
+             . pack . map BI.c2w
+
+-- | __Constant time__ when the 'Byets' have the same 'length'.
+-- Variable time otherwise.
+instance Eq Byets where
+  {-# NOINLINE (==) #-}
+  a == b = unsafeDupablePerformIO $ do
+    let aL = intervalCSize (length a)
+        bL = intervalCSize (length b)
+    access a $ \pa -> access b $ \pb ->
+      pure $ if aL == bL
+        then c_by_memeql_ct pa pb aL
+        else 0 == c_memcmp pa pb aL
+
+-- | __Constant time__ when the 'Byets' have the same 'length'.
+-- Variable time otherwise.
+instance Ord Byets where
+  {-# NOINLINE compare #-}
+  compare a b = unsafeDupablePerformIO $ do
+    let aL = intervalCSize (length a)
+        bL = intervalCSize (length b)
+    access a $ \pa -> access b $ \pb ->
+      pure $ if aL == bL
+        then compare (c_by_memcmp_be_ct pa pb aL) 0
+        else case c_memcmp pa pb aL of
+               0 -> compare aL bL
+               x -> compare x 0
+
+-- | __Constant time__. A bit more efficient than the default instance.
+instance {-# OVERLAPS #-} Access (Sized len Byets)
+  => Eq (Sized len Byets) where
+  a == b = unsafeDupablePerformIO $
+    access a $ \pa ->
+    access b $ \pb ->
+    pure $ c_by_memeql_ct pa pb (intervalCSize (length a))
+
+-- | __Constant time__. A bit more efficient than the default instance.
+instance {-# OVERLAPS #-} Access (Sized len Byets)
+  => Ord (Sized len Byets) where
+  {-# NOINLINE compare #-}
+  compare a b = unsafeDupablePerformIO $
+    access a $ \pa ->
+    access b $ \pb ->
+    pure $ compare (c_by_memcmp_be_ct pa pb (intervalCSize (length a))) 0
+
+instance GetLength Byets where
+  type MinLength Byets = 0
+  type MaxLength Byets = MaxInt
+  length (Byets len _) = len
+
+instance Access Byets where
+  access (Byets _ fp) g = withForeignPtr fp g
+
+-- | The allocated bytes will be automatically zeroed once they become
+-- unreachable.
+instance Alloc Byets where
+  alloc len g = do
+    fp <- Memzero.mallocForeignPtrBytes (intervalInt len)
+    a <- withForeignPtr fp g
+    pure (Byets len fp, a)
+
+--------------------------------------------------------------------------------
+
 -- | Encode @a@ as base-16. 'Nothing' if result doesn't fit in @b@.
 toBase16 :: (Access a, Alloc b)
          => Bool -- Uppercase if 'True'.
@@ -1101,6 +1251,27 @@ foreign import ccall unsafe "string.h memset"
     -> Word8 -- ^ value
     -> CSize -- ^ len
     -> IO ()
+
+foreign import ccall unsafe "string.h memcmp"
+  c_memcmp
+    :: Ptr Word8 -- ^ a
+    -> Ptr Word8 -- ^ b
+    -> CSize -- ^ len
+    -> CInt
+
+foreign import ccall unsafe "by.h by_memeql_ct"
+  c_by_memeql_ct
+    :: Ptr Word8 -- ^ a
+    -> Ptr Word8 -- ^ b
+    -> CSize -- ^ len
+    -> Bool
+
+foreign import ccall unsafe "by.h by_memcmp_be_ct"
+  c_by_memcmp_be_ct
+    :: Ptr Word8 -- ^ a
+    -> Ptr Word8 -- ^ b
+    -> CSize -- ^ len
+    -> CInt
 
 foreign import ccall unsafe "by.h by_to_base16_lower"
   c_by_to_base16_lower

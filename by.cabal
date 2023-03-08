@@ -30,6 +30,7 @@ library
   cc-options: -Werror -Wall -Wextra -O3
   include-dirs: c/
   c-sources:
+    c/by.c
     c/by_base16.c
     c/by_base16__avx2.c
     c/by_base16__scalar.c
@@ -47,6 +48,7 @@ test-suite test
   build-depends:
     hedgehog,
     by,
+    constraints,
     tasty,
     tasty-hedgehog,
     tasty-hunit,

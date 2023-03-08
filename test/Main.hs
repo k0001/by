@@ -15,11 +15,11 @@ import qualified By
 import Control.Monad
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
+import Data.Constraint
 import Data.Maybe
 import Data.Proxy
 import Data.Word
 import Data.Type.Ord
--- import GHC.TypeLits
 import GHC.TypeNats
 import Hedgehog (MonadGen, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
@@ -288,6 +288,5 @@ proveLE l r = case cmpNat l r of
   LTI -> Just $ unsafeCoerce (Dict @(0 <= 1))
   GTI -> Nothing
 
--- | Like the one from the 'constraints' library.
-data Dict c where
-  Dict :: c => Dict c
+-- TODO: test Byets
+
