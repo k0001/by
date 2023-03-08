@@ -58,7 +58,7 @@ module By {--}
   , toBase16N
   , fromBase16
   , base16Impl
-  , Base16Impl
+  , Base16Impl(..)
 
     -- * Utils
   , pack
@@ -144,8 +144,8 @@ type MaxInt = Div (2 ^ (Size Int * 8)) 2 - 1
 
 -- | An natural number known to be at least @l@, at most @r@.
 --
--- * Construct safely with 'interval', 'intervalFrom', 'intervalUpcast' or
--- 'intervalDowncast'.
+-- * Construct safely with 'interval', 'intervalClamp', 'intervalFrom',
+-- 'intervalUpcast' or 'intervalDowncast'.
 --
 -- * @r@ can be at most 'MaxInt' (see 'intervalAbsurdMax').
 --
@@ -186,19 +186,15 @@ withInterval i f
   = f pn
   | otherwise = error "withInterval: impossible"
 
--- | The returned number is at least @l@, at most @r@.
 intervalInt :: Interval l r -> Int
 intervalInt = coerce
 
--- | The returned number is at least @l@, at most @r@.
 intervalCSize :: Interval l r -> CSize
 intervalCSize = fromIntegral . intervalInt
 
--- | The returned number is at least @l@, at most @r@.
 intervalInteger :: Interval l r -> Integer
 intervalInteger = fromIntegral . intervalInt
 
--- | The returned number is at least @l@, at most @r@.
 intervalNatural :: Interval l r -> Natural
 intervalNatural = fromIntegral . intervalInt
 
@@ -1135,6 +1131,7 @@ data Base16Impl
   | Base16Impl_AVX2
   deriving (Eq, Ord, Show, Bounded, Enum)
 
+-- | Currently active 'Base16Impl'.
 base16Impl :: Base16Impl
 base16Impl
   | _c_by_to_base16_upper == _c_by_to_base16_upper__scalar = Base16Impl_Scalar
