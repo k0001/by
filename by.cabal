@@ -35,7 +35,9 @@ library
     c/by_base16__avx2.c
     c/by_base16__scalar.c
     c/by_base16__ssse3.c
-  exposed-modules: By
+  exposed-modules:
+    By
+    By.Interval
   build-depends:
     binary,
     memzero,

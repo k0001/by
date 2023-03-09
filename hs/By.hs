@@ -95,26 +95,6 @@ module By {--}
   -- * Endiannes
   , Endian(..)
   , Size
-
-  -- * Interval
-  , MaxInt
-  , Interval
-  , interval
-  , intervalMin
-  , intervalMax
-  , intervalSingle
-  , intervalFrom
-  , intervalClamp
-  , intervalUpcast
-  , intervalDowncast
-  , intervalPred
-  , intervalSucc
-  , intervalInt
-  , intervalCSize
-  , intervalInteger
-  , intervalNatural
-  , intervalAbsurdLR
-  , intervalAbsurdMax
   ) --}
 where
 
@@ -137,7 +117,6 @@ import Data.Proxy
 import Data.String
 import Data.Tagged
 import Data.Type.Ord
-import Data.Void
 import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (ForeignPtr, withForeignPtr, newForeignPtr_)
@@ -153,134 +132,9 @@ import Prelude qualified
 import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
---------------------------------------------------------------------------------
 
--- | Type-level version of @'maxBound' :: 'Int'@. This value is machine-dependent.
-type MaxInt = Div (2 ^ (Size Int * 8)) 2 - 1
-
--- | An natural number known to be at least @l@, at most @r@.
---
--- * Construct safely with 'interval', 'intervalClamp', 'intervalFrom',
--- 'intervalUpcast' or 'intervalDowncast'.
---
--- * @r@ can be at most 'MaxInt' (see 'intervalAbsurdMax').
---
--- * @l@ can be at most @r@ (see 'intervalAbsurdLR').
-newtype Interval (l :: Nat) (r :: Nat) = UnsafeInterval Int
-  deriving newtype (Eq, Ord, Show)
-
-intervalAbsurdLR :: (r < l) => Interval l r -> Void
-intervalAbsurdLR !_ = error "By.intervalAbsurdLR"
-
-intervalAbsurdMax :: (MaxInt < r) => Interval l r -> Void
-intervalAbsurdMax !_ = error "By.intervalAbsurdMax"
-
-intervalUpcast
-  :: forall ld rd lu ru
-  .  (lu <= ld, lu <= ru, rd <= ru)
-  => Interval ld rd
-  -> Interval lu ru
-intervalUpcast = coerce
-
-intervalDowncast
-  :: forall lu ru ld rd
-  .  (KnownNat ld, KnownNat rd)
-  => Interval lu ru
-  -> Maybe (Interval ld rd)
-intervalDowncast = intervalFrom . intervalInt
-
-withInterval
-  :: forall l r a
-  .  (KnownNat l, KnownNat r)
-  => Interval l r
-  -> (forall n. (KnownNat n, l <= n, n <= r) => Proxy n -> a)
-  -> a
-withInterval i f
-  | SomeNat (pn :: Proxy n) <- someNatVal (intervalNatural i)
-  , Just Dict <- le @l @n
-  , Just Dict <- le @n @r
-  = f pn
-  | otherwise = error "withInterval: impossible"
-
-intervalInt :: Interval l r -> Int
-intervalInt = coerce
-
-intervalCSize :: Interval l r -> CSize
-intervalCSize = fromIntegral . intervalInt
-
-intervalInteger :: Interval l r -> Integer
-intervalInteger = fromIntegral . intervalInt
-
-intervalNatural :: Interval l r -> Natural
-intervalNatural = fromIntegral . intervalInt
-
-interval
-  :: forall n l r
-  .  (KnownNat n, l <= n, n <= r, r <= MaxInt)
-  => Interval l r
-interval = UnsafeInterval (fromIntegral (natVal (Proxy @n)))
-
-intervalMin
-  :: forall l r
-  .  (KnownNat l, l <= r, r <= MaxInt)
-  => Interval l r
-intervalMin = interval @l
-
-intervalMax
-  :: forall l r
-  .  (KnownNat r, l <= r, r <= MaxInt)
-  => Interval l r
-intervalMax = interval @r
-
-intervalSingle
-  :: forall n
-  .  (KnownNat n, n <= MaxInt)
-  => Interval n n
-intervalSingle = interval @n
-
-intervalSucc
-  :: forall l r
-  .  (KnownNat l, KnownNat r)
-  => Interval l r
-  -> Maybe (Interval l r)
-intervalSucc i = do
-  guard (intervalInt i /= maxBound)
-  intervalFrom (intervalInt i + 1)
-
-intervalPred
-  :: forall l r
-  .  (KnownNat l, KnownNat r)
-  => Interval l r
-  -> Maybe (Interval l r)
-intervalPred i = do
-  guard (intervalInt i /= 0)
-  intervalFrom (intervalInt i - 1)
-
-intervalClamp
-  :: forall n l r
-  .  (Integral n, KnownNat l, KnownNat r, l <= r, r <= MaxInt)
-  => n
-  -> Interval l r
-intervalClamp =
-    UnsafeInterval . fromIntegral . clamp (l, r) . fromIntegral
-  where
-    l = natVal (Proxy @l) :: Natural
-    r = natVal (Proxy @r) :: Natural
-
-intervalFrom
-  :: forall n l r
-  .  (Integral n, KnownNat l, KnownNat r)
-  => n
-  -> Maybe (Interval l r)
-intervalFrom = \i0 -> do
-    let i1 = toInteger i0
-    -- We check (l <= r) and (r <= z) here so as to keep constraints simpler.
-    guard (l <= i1 && i1 <= r && r <= z)
-    pure (UnsafeInterval (fromIntegral i0))
-  where
-    l = toInteger (natVal (Proxy @l))
-    r = toInteger (natVal (Proxy @r))
-    z = toInteger (natVal (Proxy @MaxInt))
+import By.Interval qualified as I
+import By.Interval (Interval, MaxInt)
 
 --------------------------------------------------------------------------------
 
@@ -318,7 +172,7 @@ instance
 
 -- | Get statically known byte length.
 lengthN :: forall t. KnownLength t => LengthInterval t
-lengthN = interval @(Length t)
+lengthN = I.known @(Length t)
 
 -- | Poke a copy of @t@'s bytes into a user-given address.
 class (GetLength t, 0 < MaxLength t) => Poke t where
@@ -335,7 +189,7 @@ class (GetLength t, 0 < MaxLength t) => Poke t where
   poke :: t -> Ptr Word8 -> IO ()
   default poke :: Access t => t -> Ptr Word8 -> IO ()
   poke s dP = access s $ \sP ->
-              void $ c_memcpy dP sP (intervalCSize (length s))
+              void $ c_memcpy dP sP (I.toCSize (length s))
 
   -- | Like 'poke', but instead of writing all the bytes,
   -- @'pokeFromTo' from to t@ only writes the bytes between
@@ -360,10 +214,10 @@ class (GetLength t, 0 < MaxLength t) => Poke t where
   pokeFromTo = withDict (zeroLe @(MinLength t))
              $ withDict (zeroLe @(MaxLength t))
              $ \from to s -> do
-                 guard (from <= to && to <= intervalUpcast (length s))
-                 let len = intervalCSize to - intervalCSize from + 1
+                 guard (from <= to && to <= I.upcast (length s))
+                 let len = I.toCSize to - I.toCSize from + 1
                  pure $ \dP -> access s $ \sP ->
-                   void $ c_memcpy dP (plusPtr sP (intervalInt from)) len
+                   void $ c_memcpy dP (plusPtr sP (I.toInt from)) len
 
 -- | @
 -- 'pokeFrom' from t == 'pokeFromTo' from ('length' t)
@@ -376,7 +230,7 @@ pokeFrom
   -> Maybe (Ptr Word8 -> IO ())
 pokeFrom = withDict (zeroLe @(MinLength t))
          $ withDict (zeroLe @(MaxLength t))
-         $ \from s -> pokeFromTo from (intervalUpcast (length s)) s
+         $ \from s -> pokeFromTo from (I.upcast (length s)) s
 
 -- | @
 -- 'pokeTo' to t == 'pokeFromTo' 'intervalMin' to t
@@ -388,7 +242,7 @@ pokeTo
   -> t
   -> Maybe (Ptr Word8 -> IO ())
 pokeTo = withDict (zeroLe @(MaxLength t))
-                  (pokeFromTo (interval @0))
+                  (pokeFromTo (I.known @0))
 
 -- | Raw byte access for read-only purposes.
 --
@@ -502,7 +356,7 @@ unsafeAllocN_ g = fst (unsafeAllocN g)
 -- | @'replicate' n x@ repeats @n@ times the byte @x@.
 replicate :: Alloc a => LengthInterval a -> Word8 -> a
 replicate len x = unsafeAlloc_ len $ \p ->
-                  c_memset p x (intervalCSize len)
+                  c_memset p x (I.toCSize len)
 
 -- | @'replicate' x@ repeats @'Length' a@ times the byte @x@.
 replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
@@ -510,7 +364,7 @@ replicateN = replicate (lengthN @a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@, if it would fit.
 copy :: forall a b. (Poke a, Alloc b) => a -> Maybe b
-copy a = do bL <- intervalDowncast (length a)
+copy a = do bL <- I.downcast (length a)
             pure $ unsafeAlloc_ bL (poke a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@.
@@ -522,7 +376,7 @@ copyN
      , MaxLength a <= MaxLength b )
   => a
   -> b
-copyN a = unsafeAlloc_ (intervalUpcast (length a)) (poke a)
+copyN a = unsafeAlloc_ (I.upcast (length a)) (poke a)
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order, if it would fit in @c@.
@@ -535,11 +389,11 @@ append
   -> b
   -> Maybe c
 append a b = do
-  cL <- intervalFrom $ intervalInteger (length a)
-                     + intervalInteger (length b)
+  cL <- I.from $ I.toInteger (length a)
+                     + I.toInteger (length b)
   pure $ unsafeAlloc_ cL $ \cP -> do
     poke a cP
-    poke b (plusPtr cP (intervalInt (length a)))
+    poke b (plusPtr cP (I.toInt (length a)))
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order.
@@ -555,14 +409,14 @@ appendN
   -> c
 appendN a b = unsafeAlloc_ cL $ \cP -> do
     poke a cP
-    poke b (plusPtr cP (intervalInt (length a)))
+    poke b (plusPtr cP (I.toInt (length a)))
   where
     cL | SomeNat (_ :: Proxy cL) <-
-         someNatVal $ intervalNatural (length a)
-                    + intervalNatural (length b)
+         someNatVal $ I.toNatural (length a)
+                    + I.toNatural (length b)
        , Just Dict <- le @cL @(MaxLength c)
        , Just Dict <- le @(MinLength c) @cL
-       = interval @cL
+       = I.known @cL
        | otherwise = error "By.append: impossible"
 
 -- | @'splitAt' n a@ copies the @n@ leading bytes of @a@ into a newly
@@ -604,7 +458,7 @@ take
   => Interval 0 (MaxLength a)
   -> a
   -> Maybe b
-take bLa0 a = unsafeAlloc_ <$> intervalDowncast bLa0 <*> pokeTo bLa0 a
+take bLa0 a = unsafeAlloc_ <$> I.downcast bLa0 <*> pokeTo bLa0 a
 
 -- | @'takeN' a@ copies the leading bytes of @a@ into a
 -- newly allocated @b@ of known length.
@@ -617,7 +471,7 @@ takeN
   => a
   -> b
 takeN a = fromMaybe (error "By.takeN: impossible") $ do
-            bLa <- intervalDowncast (lengthN @b)
+            bLa <- I.downcast (lengthN @b)
             take bLa a
 
 -- | @'drop' n a@ copies the @n@ trailing bytes of @a@ into a newly
@@ -630,8 +484,8 @@ drop
   -> a
   -> Maybe b
 drop dropLa0 a = do
-  bL <- intervalFrom $ intervalInt (length a) - intervalInt dropLa0
-  pokeB <- flip pokeFrom a =<< intervalSucc dropLa0
+  bL <- I.from $ I.toInt (length a) - I.toInt dropLa0
+  pokeB <- flip pokeFrom a =<< I.succ dropLa0
   pure $ unsafeAlloc_ bL pokeB
 
 -- | @'dropN' a@ copies the trailing bytes of @a@ into a
@@ -644,16 +498,17 @@ dropN
      , Length b <= MinLength a )
   => a
   -> b
-dropN a = fromMaybe (error "By.dropN: impossible") $ do
-            -- TODO use intervalUpcast here
-            dropLa <- intervalDowncast (lengthN @b)
-            drop dropLa a
+dropN = withDict (zeroLe @(MaxLength a))
+      $ withDict (zeroLe @(MaxLength b))
+      $ withDict (leTrans @(MaxLength b) @(MinLength a) @(MaxLength a))
+      $ fromMaybe (error "By.dropN: impossible")
+      . drop (I.upcast (lengthN @b))
 
 -- | Allocate a new @a@ made up of the bytes in @f@.
 -- 'Nothing' if the result wouldn't fit in @a@.
 pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
 pack ws = do
-  aL <- intervalFrom (F.length ws)
+  aL <- I.from (F.length ws)
   pure $ unsafeAlloc_ aL $ \aP ->
          F.foldlM (\off w -> do c_memset (plusPtr aP off) w 1
                                 pure $! off + 1)
@@ -663,7 +518,7 @@ pack ws = do
 -- | List of bytes in @a@.
 unpack :: Access a => a -> [Word8]
 {-# NOINLINE unpack #-}
-unpack a = unsafeDupablePerformIO $ access a (f (intervalInt (length a)))
+unpack a = unsafeDupablePerformIO $ access a (f (I.toInt (length a)))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
     f 0 !_ = pure []
@@ -722,17 +577,16 @@ showStringBase16 = \u a -> if
   | otherwise -> error "showsStringBase16: impossible"
   where
     bLa0 :: Interval 0 (MaxLength a)
-    bLa0 = withDict (zeroLe @(MaxLength a))
-                    (intervalClamp (4096 :: Int))
+    bLa0 = withDict (zeroLe @(MaxLength a)) (I.clamp (4096 :: Int))
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
 concat :: forall a b f. (Access a, Alloc b, Foldable f) => f a -> Maybe b
 concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
-  bL <- intervalFrom $ F.foldl' (\ !z a -> z + intervalInteger (length a)) 0 as
+  bL <- I.from $ F.foldl' (\ !z a -> z + I.toInteger (length a)) 0 as
   pure $ unsafeAlloc_ bL $ \outP ->
          F.foldlM (\off a -> do poke a (plusPtr outP off)
-                                pure $! off + intervalInt (length a))
+                                pure $! off + I.toInt (length a))
          0
          as
 
@@ -742,7 +596,7 @@ concat as = do
 instance GetLength () where
   type MinLength () = 0
   type MaxLength () = 0
-  length () = interval @0
+  length () = I.known @0
 
 -- | Interpreted as 'nullPtr'.
 instance Alloc () where
@@ -784,14 +638,14 @@ instance
   , KnownLength (Sized len t)
   ) => Alloc (Sized len t) where
   alloc l g = do
-    (t, a) <- alloc (intervalUpcast l) g
+    (t, a) <- alloc (I.upcast l) g
     pure (Sized t, a)
 
 instance KnownLength (Sized len B.ByteString)
   => Bin.Binary (Sized len B.ByteString) where
   put (Sized t) = Bin.putByteString t
   get = fmap Sized $ Bin.getByteString $
-          intervalInt $ lengthN @(Sized len B.ByteString)
+          I.toInt $ lengthN @(Sized len B.ByteString)
 
 unSized :: Sized len t -> t
 unSized = coerce
@@ -807,7 +661,7 @@ sized = \t -> do
   Dict <- le @(MinLength t) @len
   Dict <- le @len @(MaxLength t)
   withDict (leTrans @len @(MaxLength t) @MaxInt) $ do
-    tL <- intervalFrom (intervalInt (length t))
+    tL <- I.from (I.toInt (length t))
     guard (tL == lengthN @(Sized len t))
     pure (Sized t)
 
@@ -848,7 +702,7 @@ withSizedMinMax
        -> a )
   -> Maybe a
 withSizedMinMax t g = do
-  SomeNat (_ :: Proxy len) <- pure $ someNatVal $ intervalNatural (length t)
+  SomeNat (_ :: Proxy len) <- pure $ someNatVal $ I.toNatural (length t)
   Dict <- le @min @len
   Dict <- le @len @max
   Dict <- le @(MinLength t) @len
@@ -873,7 +727,7 @@ withSizedMinMaxN
        -> a )
   -> a
 withSizedMinMaxN t
-  = withInterval (length t) $ \(_ :: Proxy len) ->
+  = I.with (length t) $ \(_ :: Proxy len) ->
       withDict (leTrans @min @(MinLength t) @len) $
       withDict (leTrans @len @(MaxLength t) @max) $
       withDict (leTrans @len @(MaxLength t) @MaxInt) $ \f ->
@@ -943,7 +797,7 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
     :: forall h
     .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Storable a)
     => a -> h
-  encodeH = \a -> unsafeAlloc_ (interval @(Size a)) $ \p ->
+  encodeH = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
                   Sto.poke (castPtr p) a
 
   -- | Writes @a@ in @le@ using Litle-Endian encoding.
@@ -1098,7 +952,7 @@ padLeftN
 padLeftN w a = do
   let bL = lengthN @b
       aL = length a
-      dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+      dLi = I.toInt bL - I.toInt aL -- positive because (aL <= bL)
   unsafeAllocN_ $ \bP -> do
     c_memset bP w (fromIntegral dLi)
     poke a (plusPtr bP dLi)
@@ -1117,10 +971,10 @@ padRightN
 padRightN w a = do
   let aL = length a
       bL = lengthN @b
-      dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+      dLi = I.toInt bL - I.toInt aL -- positive because (aL <= bL)
   unsafeAllocN_ $ \bP -> do
     poke a bP
-    c_memset (plusPtr bP (intervalInt aL)) w (fromIntegral dLi)
+    c_memset (plusPtr bP (I.toInt aL)) w (fromIntegral dLi)
 
 --------------------------------------------------------------------------------
 
@@ -1128,7 +982,7 @@ instance GetLength B.ByteString where
   type MinLength B.ByteString = 0
   type MaxLength B.ByteString = MaxInt
   length = fromMaybe (error "By.lenght: unexpected ByteString length")
-         . intervalFrom
+         . I.from
          . B.length
 
 
@@ -1141,7 +995,7 @@ instance Access B.ByteString where
 
 instance Alloc B.ByteString where
   alloc len g = do
-    let len' = intervalInt len
+    let len' = I.toInt len
     fp <- BI.mallocByteString len'
     a <- withForeignPtr fp (g . castPtr)
     pure (BI.fromForeignPtr fp 0 len', a)
@@ -1182,8 +1036,8 @@ type family NoSuchInstance where
 -- true of types like 'B.ByteString', too. Use 'concat' if you are
 -- paranoid.
 instance Semigroup Byets where
-  a <> b | length a == interval @0 = b
-         | length b == interval @0 = a
+  a <> b | length a == I.known @0 = b
+         | length b == I.known @0 = a
          | otherwise = fromMaybe (error "By.Byets.(<>): too long") (append a b)
 
 -- | See the 'Semigroup' instance for 'Byets'.
@@ -1191,7 +1045,7 @@ instance Monoid Byets where
   {-# NOINLINE mempty #-}
   mempty = unsafePerformIO $ do
     fp <- newForeignPtr_ nullPtr
-    pure $ Byets (interval @0) fp
+    pure $ Byets (I.known @0) fp
   mconcat []  = mempty
   mconcat [a] = a
   mconcat as  = fromMaybe (error "By.Byets.mconcat: too long") (concat as)
@@ -1210,8 +1064,8 @@ instance IsString Byets where
 instance Eq Byets where
   {-# NOINLINE (==) #-}
   a == b = unsafeDupablePerformIO $ do
-    let aL = intervalCSize (length a)
-        bL = intervalCSize (length b)
+    let aL = I.toCSize (length a)
+        bL = I.toCSize (length b)
     access a $ \pa -> access b $ \pb ->
       pure $ if aL == bL
         then c_by_memeql_ct pa pb aL
@@ -1222,8 +1076,8 @@ instance Eq Byets where
 instance Ord Byets where
   {-# NOINLINE compare #-}
   compare a b = unsafeDupablePerformIO $ do
-    let aL = intervalCSize (length a)
-        bL = intervalCSize (length b)
+    let aL = I.toCSize (length a)
+        bL = I.toCSize (length b)
     access a $ \pa -> access b $ \pb ->
       pure $ if aL == bL
         then compare (c_by_memcmp_be_ct pa pb aL) 0
@@ -1238,7 +1092,7 @@ instance {-# OVERLAPS #-} Access (Sized len Byets)
   a == b = unsafeDupablePerformIO $
     access a $ \pa ->
     access b $ \pb ->
-    pure $ c_by_memeql_ct pa pb (intervalCSize (length a))
+    pure $ c_by_memeql_ct pa pb (I.toCSize (length a))
 
 -- | __Constant time__. A bit more efficient than the default instance.
 instance {-# OVERLAPS #-} Access (Sized len Byets)
@@ -1247,7 +1101,7 @@ instance {-# OVERLAPS #-} Access (Sized len Byets)
   compare a b = unsafeDupablePerformIO $
     access a $ \pa ->
     access b $ \pb ->
-    pure $ compare (c_by_memcmp_be_ct pa pb (intervalCSize (length a))) 0
+    pure $ compare (c_by_memcmp_be_ct pa pb (I.toCSize (length a))) 0
 
 instance GetLength Byets where
   type MinLength Byets = 0
@@ -1263,7 +1117,7 @@ instance Access Byets where
 -- unreachable.
 instance Alloc Byets where
   alloc len g = do
-    fp <- Memzero.mallocForeignPtrBytes (intervalInt len)
+    fp <- Memzero.mallocForeignPtrBytes (I.toInt len)
     a <- withForeignPtr fp g
     pure (Byets len fp, a)
 
@@ -1275,10 +1129,10 @@ toBase16 :: (Access a, Alloc b)
          -> a
          -> Maybe b
 toBase16 u = \bin -> do
-    b16L <- intervalFrom (2 * intervalInteger (length bin))
+    b16L <- I.from (2 * I.toInteger (length bin))
     pure $ unsafeAlloc_ b16L $ \b16P ->
            access bin $ \binP ->
-           f b16P binP (intervalCSize (length bin))
+           f b16P binP (I.toCSize (length bin))
   where
     f = if u then c_by_to_base16_upper
              else c_by_to_base16_lower
@@ -1298,12 +1152,12 @@ toBase16N u = fromMaybe (error "By.toBase16N: impossible") . toBase16 u
 fromBase16 :: forall a b. (Access a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
   let b16L = length b16
-  binL <- case divMod (intervalInt b16L) 2 of
-            (d, 0) -> intervalFrom d
+  binL <- case divMod (I.toInt b16L) 2 of
+            (d, 0) -> I.from d
             _      -> Nothing
   let (bin, ret) = unsafeAlloc binL $ \binP ->
                    access b16 $ \b16P ->
-                   c_by_from_base16 binP (intervalCSize binL) b16P
+                   c_by_from_base16 binP (I.toCSize binL) b16P
   guard (ret == 0)
   Just bin
 
@@ -1390,5 +1244,4 @@ foreign import ccall unsafe "by.h &by_to_base16_upper__ssse3"
   _c_by_to_base16_upper__ssse3 :: Ptr a
 foreign import ccall unsafe "by.h &by_to_base16_upper__avx2"
   _c_by_to_base16_upper__avx2 :: Ptr a
-
 
