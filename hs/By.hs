@@ -10,6 +10,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoStarIsType #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
@@ -39,6 +40,9 @@ module By {--}
   , allocN_
   , unsafeAllocN
   , unsafeAllocN_
+
+    -- * Access
+  , Poke (..)
 
     -- * Access
   , Access (..)
@@ -103,6 +107,8 @@ module By {--}
   , intervalClamp
   , intervalUpcast
   , intervalDowncast
+  , intervalPred
+  , intervalSucc
   , intervalInt
   , intervalCSize
   , intervalInteger
@@ -136,7 +142,8 @@ import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (ForeignPtr, withForeignPtr, newForeignPtr_)
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
-import Foreign.Storable
+import Foreign.Storable (Storable)
+import Foreign.Storable qualified as Sto
 import GHC.TypeLits qualified as GHC
 import GHC.TypeNats
 import Memzero qualified
@@ -190,8 +197,8 @@ withInterval
   -> a
 withInterval i f
   | SomeNat (pn :: Proxy n) <- someNatVal (intervalNatural i)
-  , Just Dict <- proveLE @l @n
-  , Just Dict <- proveLE @n @r
+  , Just Dict <- le @l @n
+  , Just Dict <- le @n @r
   = f pn
   | otherwise = error "withInterval: impossible"
 
@@ -230,6 +237,24 @@ intervalSingle
   .  (KnownNat n, n <= MaxInt)
   => Interval n n
 intervalSingle = interval @n
+
+intervalSucc
+  :: forall l r
+  .  (KnownNat l, KnownNat r)
+  => Interval l r
+  -> Maybe (Interval l r)
+intervalSucc i = do
+  guard (intervalInt i /= maxBound)
+  intervalFrom (intervalInt i + 1)
+
+intervalPred
+  :: forall l r
+  .  (KnownNat l, KnownNat r)
+  => Interval l r
+  -> Maybe (Interval l r)
+intervalPred i = do
+  guard (intervalInt i /= 0)
+  intervalFrom (intervalInt i - 1)
 
 intervalClamp
   :: forall n l r
@@ -295,10 +320,80 @@ instance
 lengthN :: forall t. KnownLength t => LengthInterval t
 lengthN = interval @(Length t)
 
+-- | Poke a copy of @t@'s bytes into a user-given address.
+class (GetLength t, 0 < MaxLength t) => Poke t where
+  -- | Write a copy of @t@'s bytes into the buffer starting at 'Ptr'.
+  --
+  -- __WARNING:__
+  --
+  -- * The caller is responsible for ensuring the
+  -- the entire 'length' of @t@ will fit in the buffer starting
+  -- at 'Ptr'.
+  --
+  -- * The author of this instance must ensure all 'poke' does
+  -- is write into the 'Ptr'.
+  poke :: t -> Ptr Word8 -> IO ()
+  default poke :: Access t => t -> Ptr Word8 -> IO ()
+  poke s dP = access s $ \sP ->
+              void $ c_memcpy dP sP (intervalCSize (length s))
+
+  -- | Like 'poke', but instead of writing all the bytes,
+  -- @'pokeFromTo' from to t@ only writes the bytes between
+  -- @from@ and @to@, inclusive. Returns 'Nothing' if out
+  -- @from@ is greater than @to@ or @to@ is greater than
+  -- @'length' t@.
+  --
+  -- @
+  -- 'pokeFromTo' 'intervalMin' ('length' t) t == 'Just' ('poke' t)
+  -- @
+  pokeFromTo
+    :: Interval 0 (MaxLength t) -- ^ From (inclusive).
+    -> Interval 0 (MaxLength t) -- ^ To (inclusive).
+    -> t
+    -> Maybe (Ptr Word8 -> IO ())
+  default pokeFromTo
+    :: Access t
+    => Interval 0 (MaxLength t)
+    -> Interval 0 (MaxLength t)
+    -> t
+    -> Maybe (Ptr Word8 -> IO ())
+  pokeFromTo = withDict (zeroLe @(MinLength t))
+             $ withDict (zeroLe @(MaxLength t))
+             $ \from to s -> do
+                 guard (from <= to && to <= intervalUpcast (length s))
+                 let len = intervalCSize to - intervalCSize from + 1
+                 pure $ \dP -> access s $ \sP ->
+                   void $ c_memcpy dP (plusPtr sP (intervalInt from)) len
+
+-- | @
+-- 'pokeFrom' from t == 'pokeFromTo' from ('length' t)
+-- @
+pokeFrom
+  :: forall t
+  .  Poke t
+  => Interval 0 (MaxLength t) -- ^ From (inclusive).
+  -> t
+  -> Maybe (Ptr Word8 -> IO ())
+pokeFrom = withDict (zeroLe @(MinLength t))
+         $ withDict (zeroLe @(MaxLength t))
+         $ \from s -> pokeFromTo from (intervalUpcast (length s)) s
+
+-- | @
+-- 'pokeTo' to t == 'pokeFromTo' 'intervalMin' to t
+-- @
+pokeTo
+  :: forall t
+  .  Poke t
+  => Interval 0 (MaxLength t) -- ^ To (inclusive).
+  -> t
+  -> Maybe (Ptr Word8 -> IO ())
+pokeTo = withDict (zeroLe @(MaxLength t))
+                  (pokeFromTo (interval @0))
+
 -- | Raw byte access for read-only purposes.
 --
 -- __WARNING__ The “read-only” part is not enforced anywhere. Be careful.
-class GetLength t => Access t where
+class Poke t => Access t where
   access :: t -> (Ptr Word8 -> IO a) -> IO a
 
 -- | Like 'access', but “pure”. This is safe as long as the
@@ -414,190 +509,145 @@ replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
 replicateN = replicate (lengthN @a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@, if it would fit.
-copy :: forall a b. (Access a, Alloc b) => a -> Maybe b
-copy a = do
-   bL <- intervalDowncast (length a)
-   pure $ unsafeAlloc_ bL $ \bP ->
-          access a $ \aP ->
-          c_memcpy bP aP (intervalCSize bL)
+copy :: forall a b. (Poke a, Alloc b) => a -> Maybe b
+copy a = do bL <- intervalDowncast (length a)
+            pure $ unsafeAlloc_ bL (poke a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@.
 copyN
   :: forall a b
-  .  ( Access a
+  .  ( Poke a
      , Alloc b
      , MinLength b <= MinLength a
      , MaxLength a <= MaxLength b )
   => a
   -> b
-copyN a =
-  let aL = length a
-  in  unsafeAlloc_ (intervalUpcast aL) $ \bP ->
-      access a $ \aP ->
-      c_memcpy bP aP (intervalCSize aL)
+copyN a = unsafeAlloc_ (intervalUpcast (length a)) (poke a)
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order, if it would fit in @c@.
 append
   :: forall a b c
-  .  ( Access a
-     , Access b
+  .  ( Poke a
+     , Poke b
      , Alloc c )
   => a
   -> b
   -> Maybe c
 append a b = do
-  let aL = length a
-      bL = length b
-  cL <- intervalFrom (intervalInteger aL + intervalInteger bL)
-  pure $ unsafeAlloc_ cL $ \cP ->
-         access a $ \aP ->
-         access b $ \bP -> do
-           void $ c_memcpy cP aP (intervalCSize aL)
-           void $ c_memcpy (plusPtr cP (intervalInt aL)) bP (intervalCSize bL)
+  cL <- intervalFrom $ intervalInteger (length a)
+                     + intervalInteger (length b)
+  pure $ unsafeAlloc_ cL $ \cP -> do
+    poke a cP
+    poke b (plusPtr cP (intervalInt (length a)))
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order.
 appendN
   :: forall a b c
-  .  ( Access a
-     , Access b
+  .  ( Poke a
+     , Poke b
      , Alloc c
      , MinLength c <= MinLength a + MinLength b
      , MaxLength a + MaxLength b <= MaxLength c )
   => a
   -> b
   -> c
-appendN a b =
-    unsafeAlloc_ cL $ \cP ->
-    access a $ \aP ->
-    access b $ \bP -> do
-      void $ c_memcpy cP aP (intervalCSize aL)
-      void $ c_memcpy (plusPtr cP (intervalInt aL)) bP (intervalCSize bL)
+appendN a b = unsafeAlloc_ cL $ \cP -> do
+    poke a cP
+    poke b (plusPtr cP (intervalInt (length a)))
   where
-    aL = length a
-    bL = length b
     cL | SomeNat (_ :: Proxy cL) <-
-           someNatVal (intervalNatural aL + intervalNatural bL)
-       , Just Dict <- proveLE @cL @(MaxLength c)
-       , Just Dict <- proveLE @(MinLength c) @cL
+         someNatVal $ intervalNatural (length a)
+                    + intervalNatural (length b)
+       , Just Dict <- le @cL @(MaxLength c)
+       , Just Dict <- le @(MinLength c) @cL
        = interval @cL
        | otherwise = error "By.append: impossible"
 
 -- | @'splitAt' n a@ copies the @n@ leading bytes of @a@ into a newly
 -- allocated @b@, and the trailing @'length' a - n@ bytes of @a@
--- into @b@, if they would fit.
+-- into a newly allocated @c@, if they would fit.
 splitAt
   :: forall a b c
-  .  ( Access a
+  .  ( Poke a
      , Alloc b
      , Alloc c )
-  => LengthInterval a
+  => Interval 0 (MaxLength a)
   -> a
   -> Maybe (b, c)
-splitAt bLa a = do
-  let aL :: LengthInterval a = length a
-  bL :: LengthInterval b <- intervalDowncast bLa
-  cL :: LengthInterval c <- intervalFrom $ intervalInteger aL
-                                         - intervalInteger bL
-  pure $ unsafeAlloc bL $ \bP ->
-         alloc_ cL $ \cP ->
-         access a $ \aP -> do
-           void $ c_memcpy bP aP (intervalCSize bL)
-           c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
+splitAt bLa a = (,) <$> take bLa a <*> drop bLa a
 
 -- | @'splitAtN' a@ splits @a@ into two parts of known lengths.
 --
 -- The resulting parts are copies independent from @a@.
 splitAtN
   :: forall a b c
-  .  ( Access a
+  .  ( Poke a
      , Alloc b
      , Alloc c
+     , KnownLength a
      , KnownLength b
      , KnownLength c
      , Length a ~ (Length b + Length c) )
   => a
   -> (b, c)
-splitAtN =
-  let bL = lengthN @b
-      cL = lengthN @c
-  in \a -> unsafeAllocN $ \bP ->
-           allocN_ $ \cP ->
-           access a $ \aP -> do
-             void $ c_memcpy bP aP (intervalCSize bL)
-             c_memcpy cP (plusPtr aP (intervalInt bL)) (intervalCSize cL)
+splitAtN = withDict (addLe @(Length a) @(Length b) @(Length c))
+         $ \a -> (takeN a, dropN a)
 
 -- | @'take' n a@ copies the @n@ leading bytes of @a@ into a
 -- newly allocated @b@, if it would fit.
 take
   :: forall a b.
-     ( Access a
+     ( Poke a
      , Alloc b )
-  => LengthInterval a
+  => Interval 0 (MaxLength a)
   -> a
   -> Maybe b
-take bLa a = do
-  let aL :: LengthInterval a = length a
-  guard (bLa <= aL)
-  bL :: LengthInterval b <- intervalDowncast bLa
-  pure $ unsafeAlloc_ bL $ \bP ->
-         access a $ \aP ->
-         c_memcpy bP aP (intervalCSize bL)
+take bLa0 a = unsafeAlloc_ <$> intervalDowncast bLa0 <*> pokeTo bLa0 a
 
--- | @'dropN' a@ copies the leading bytes of @a@ into a
+-- | @'takeN' a@ copies the leading bytes of @a@ into a
 -- newly allocated @b@ of known length.
 takeN
   :: forall a b.
-     ( Access a
+     ( Poke a
      , Alloc b
      , KnownLength b
-     , Length b <= Length a )
+     , Length b <= MinLength a )
   => a
   -> b
-takeN =
-  let bL = lengthN @b
-  in  \a -> unsafeAllocN_ $ \bP ->
-            access a $ \aP ->
-            c_memcpy bP aP (intervalCSize bL)
+takeN a = fromMaybe (error "By.takeN: impossible") $ do
+            bLa <- intervalDowncast (lengthN @b)
+            take bLa a
 
 -- | @'drop' n a@ copies the @n@ trailing bytes of @a@ into a newly
 -- allocated @b@, if it would fit.
 drop
   :: forall a b.
-     ( Access a
+     ( Poke a
      , Alloc b )
-  => LengthInterval a
+  => Interval 0 (MaxLength a)
   -> a
   -> Maybe b
-drop bLa a = do
-  let aL :: LengthInterval a = length a
-  guard (bLa <= aL)
-  bL :: LengthInterval b <- intervalDowncast bLa
-  let dL' :: Int = intervalInt aL - intervalInt bL
-  pure $ unsafeAlloc_ bL $ \bP ->
-         access a $ \aP ->
-         c_memcpy bP (plusPtr aP dL') (intervalCSize bL)
+drop dropLa0 a = do
+  bL <- intervalFrom $ intervalInt (length a) - intervalInt dropLa0
+  pokeB <- flip pokeFrom a =<< intervalSucc dropLa0
+  pure $ unsafeAlloc_ bL pokeB
 
 -- | @'dropN' a@ copies the trailing bytes of @a@ into a
 -- newly allocated @b@ of known length.
 dropN
   :: forall a b.
-     ( Access a
+     ( Poke a
      , Alloc b
-     , KnownLength a
      , KnownLength b
-     , Length b <= Length a )
+     , Length b <= MinLength a )
   => a
   -> b
-dropN = \a ->
-    unsafeAllocN_ $ \bP ->
-    access a $ \aP ->
-    c_memcpy bP (plusPtr aP pL') (intervalCSize bL)
-  where
-    aL = lengthN @a
-    bL = lengthN @b
-    pL' = intervalInt aL - intervalInt bL
+dropN a = fromMaybe (error "By.dropN: impossible") $ do
+            -- TODO use intervalUpcast here
+            dropLa <- intervalDowncast (lengthN @b)
+            drop dropLa a
 
 -- | Allocate a new @a@ made up of the bytes in @f@.
 -- 'Nothing' if the result wouldn't fit in @a@.
@@ -617,7 +667,7 @@ unpack a = unsafeDupablePerformIO $ access a (f (intervalInt (length a)))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
     f 0 !_ = pure []
-    f n  p = do !x <- peek p
+    f n  p = do !x <- Sto.peek p
                 !xs <- f (n - 1) (plusPtr p 1)
                 pure (x : xs)
 
@@ -662,17 +712,18 @@ showStringBase16
   => Bool -- Uppercase if 'True'.
   -> a
   -> ShowS
-showStringBase16 u a
+showStringBase16 = \u a -> if
   | Just aB16 <- toBase16 u a
-      = showString (aB16 :: B.ByteString)
-  | Just (b, c) <- splitAt bLa a
+      -> showString (aB16 :: B.ByteString)
+  | Just (b, c) <- splitAt bLa0 a
   , Just bB16 <- toBase16 u (b :: B.ByteString)
-      = showString (bB16 :: B.ByteString)
-      . showStringBase16 u (c :: B.ByteString)
-  | otherwise = error "showsStringBase16: impossible"
+      -> showString (bB16 :: B.ByteString) .
+         showStringBase16 u (c :: B.ByteString)
+  | otherwise -> error "showsStringBase16: impossible"
   where
-    bLa :: LengthInterval a
-    bLa = intervalClamp (4096 :: Int)
+    bLa0 :: Interval 0 (MaxLength a)
+    bLa0 = withDict (zeroLe @(MaxLength a))
+                    (intervalClamp (4096 :: Int))
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
 concat :: forall a b f. (Access a, Alloc b, Foldable f) => f a -> Maybe b
@@ -680,23 +731,23 @@ concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
   bL <- intervalFrom $ F.foldl' (\ !z a -> z + intervalInteger (length a)) 0 as
   pure $ unsafeAlloc_ bL $ \outP ->
-         F.foldlM (\off a -> access a $ \aP -> do
-                      let aL = length a
-                      void $ c_memcpy (plusPtr outP off) aP (intervalCSize aL)
-                      pure $! off + intervalInt aL)
+         F.foldlM (\off a -> do poke a (plusPtr outP off)
+                                pure $! off + intervalInt (length a))
          0
          as
 
 --------------------------------------------------------------------------------
 
 -- | Interpreted as 'nullPtr'.
-instance Access () where
-  access _ g = g nullPtr
-
 instance GetLength () where
   type MinLength () = 0
   type MaxLength () = 0
   length () = interval @0
+
+-- | Interpreted as 'nullPtr'.
+instance Alloc () where
+  alloc _ g = do a <- g nullPtr
+                 pure ((), a)
 
 --------------------------------------------------------------------------------
 
@@ -706,10 +757,22 @@ newtype Sized (len :: Natural) t = Sized t
 deriving newtype instance {-# OVERLAPPABLE #-} Eq t => Eq (Sized len t)
 deriving newtype instance {-# OVERLAPPABLE #-} Ord t => Ord (Sized len t)
 
-deriving newtype instance (GetLength (Sized len t), Access t)
-  => Access (Sized len t)
+deriving newtype instance
+  ( GetLength (Sized len t)
+  , Poke t
+  , 0 < MaxLength (Sized len t)
+  ) => Poke (Sized len t)
 
-instance (KnownNat len, MinLength t <= len, len <= MaxLength t, len <= MaxInt)
+deriving newtype instance
+  ( Poke (Sized len t)
+  , Access t
+  ) => Access (Sized len t)
+
+instance
+  ( KnownNat len
+  , MinLength t <= len
+  , len <= MaxLength t
+  , len <= MaxInt )
   => GetLength (Sized len t) where
   type MinLength (Sized len t) = len
   type MaxLength (Sized len t) = len
@@ -727,8 +790,8 @@ instance
 instance KnownLength (Sized len B.ByteString)
   => Bin.Binary (Sized len B.ByteString) where
   put (Sized t) = Bin.putByteString t
-  get = Sized <$> Bin.getByteString
-                        (intervalInt (lengthN @(Sized len B.ByteString)))
+  get = fmap Sized $ Bin.getByteString $
+          intervalInt $ lengthN @(Sized len B.ByteString)
 
 unSized :: Sized len t -> t
 unSized = coerce
@@ -741,12 +804,12 @@ sized
   => t
   -> Maybe (Sized len t)
 sized = \t -> do
-  Dict <- proveLE @(MinLength t) @len
-  Dict <- proveLE @len @(MaxLength t)
-  Dict <- pure $ evidence $ leTrans @len @(MaxLength t) @MaxInt
-  tL <- intervalFrom (intervalInt (length t))
-  guard (tL == lengthN @(Sized len t))
-  pure (Sized t)
+  Dict <- le @(MinLength t) @len
+  Dict <- le @len @(MaxLength t)
+  withDict (leTrans @len @(MaxLength t) @MaxInt) $ do
+    tL <- intervalFrom (intervalInt (length t))
+    guard (tL == lengthN @(Sized len t))
+    pure (Sized t)
 
 -- | Wrap the @t@ in a 'Sized' if it has the correct length,
 -- otherwise fail with 'error'.
@@ -786,12 +849,12 @@ withSizedMinMax
   -> Maybe a
 withSizedMinMax t g = do
   SomeNat (_ :: Proxy len) <- pure $ someNatVal $ intervalNatural (length t)
-  Dict <- proveLE @min @len
-  Dict <- proveLE @len @max
-  Dict <- proveLE @(MinLength t) @len
-  Dict <- proveLE @len @(MaxLength t)
-  Dict <- pure $ evidence $ leTrans @len @(MaxLength t) @MaxInt
-  pure $ g (Sized t :: Sized len t)
+  Dict <- le @min @len
+  Dict <- le @len @max
+  Dict <- le @(MinLength t) @len
+  Dict <- le @len @(MaxLength t)
+  withDict (leTrans @len @(MaxLength t) @MaxInt) $
+    pure $ g (Sized t :: Sized len t)
 
 -- | Wrap the @t@ in a 'Sized' of length known to be within @min@ and @max@.
 withSizedMinMaxN
@@ -809,20 +872,24 @@ withSizedMinMaxN
        => Sized len t
        -> a )
   -> a
-withSizedMinMaxN t = withInterval (length t) $ \(_ :: Proxy len) ->
-  case evidence $ leTrans @min @(MinLength t) @len of
-    Dict -> case evidence $ leTrans @len @(MaxLength t) @max of
-      Dict -> case evidence $ leTrans @len @(MaxLength t) @MaxInt of
-        Dict -> \f -> f (Sized t :: Sized len t)
+withSizedMinMaxN t
+  = withInterval (length t) $ \(_ :: Proxy len) ->
+      withDict (leTrans @min @(MinLength t) @len) $
+      withDict (leTrans @len @(MaxLength t) @max) $
+      withDict (leTrans @len @(MaxLength t) @MaxInt) $ \f ->
+      f (Sized t :: Sized len t)
 
-proveLE
-  :: forall l r
-  .  (KnownNat l, KnownNat r)
-  => Maybe (Dict (l <= r))
-proveLE = case cmpNat (Proxy @l) (Proxy @r) of
+le :: forall l r
+   .  (KnownNat l, KnownNat r)
+   => Maybe (Dict (l <= r))
+le = case cmpNat (Proxy @l) (Proxy @r) of
   EQI -> Just $ unsafeCoerce (Dict @())
   LTI -> Just $ unsafeCoerce (Dict @())
   GTI -> Nothing
+
+addLe :: forall (a :: Nat) (b :: Nat) (c :: Nat)
+      .  (a ~ b + c) :- (b <= a, c <= a)
+addLe = Sub (unsafeCoerce (Dict @()))
 
 --------------------------------------------------------------------------------
 
@@ -877,7 +944,7 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
     .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Storable a)
     => a -> h
   encodeH = \a -> unsafeAlloc_ (interval @(Size a)) $ \p ->
-                  poke (castPtr p) a
+                  Sto.poke (castPtr p) a
 
   -- | Writes @a@ in @le@ using Litle-Endian encoding.
   encodeLE
@@ -896,7 +963,7 @@ class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
   -- | Default implementation in case there is a @'Storable' a@ instance.
   default decodeH
     :: forall h. (Access h, Size a ~ Length h, Storable a) => h -> a
-  decodeH h = unsafeDupablePerformIO $ access h (peek . castPtr)
+  decodeH h = unsafeDupablePerformIO $ access h (Sto.peek . castPtr)
   {-# NOINLINE decodeH #-}
 
   -- | Reads @a@ from @le@ using Little-Endian encoding.
@@ -1021,40 +1088,38 @@ le64toh = id
 -- Returns a copy.
 padLeftN
   :: forall a b
-  .  ( Access a
+  .  ( Poke a
      , Alloc b
      , KnownLength b
      , MaxLength a <= Length b )
   => Word8
   -> a
   -> b
-padLeftN w a =
-  unsafeAllocN_ $ \bP ->
-  access a $ \aP -> do
-    let bL = lengthN @b
-        aL = length a
-        dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+padLeftN w a = do
+  let bL = lengthN @b
+      aL = length a
+      dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+  unsafeAllocN_ $ \bP -> do
     c_memset bP w (fromIntegral dLi)
-    c_memcpy (plusPtr bP dLi) aP (intervalCSize aL)
+    poke a (plusPtr bP dLi)
 
 -- | @'padRightN' w a@ extends @a@ with zero or more @w@s on its right.
 -- Returns a copy.
 padRightN
   :: forall a b
-  .  ( Access a
+  .  ( Poke a
      , Alloc b
      , KnownLength b
      , MaxLength a <= Length b )
   => Word8
   -> a
   -> b
-padRightN w a =
-  unsafeAllocN_ $ \bP ->
-  access a $ \aP -> do
-    let aL = length a
-        bL = lengthN @b
-        dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
-    void $ c_memcpy bP aP (intervalCSize aL)
+padRightN w a = do
+  let aL = length a
+      bL = lengthN @b
+      dLi = intervalInt bL - intervalInt aL -- positive because (aL <= bL)
+  unsafeAllocN_ $ \bP -> do
+    poke a bP
     c_memset (plusPtr bP (intervalInt aL)) w (fromIntegral dLi)
 
 --------------------------------------------------------------------------------
@@ -1065,6 +1130,9 @@ instance GetLength B.ByteString where
   length = fromMaybe (error "By.lenght: unexpected ByteString length")
          . intervalFrom
          . B.length
+
+
+instance Poke B.ByteString
 
 instance Access B.ByteString where
   access bs g = do
@@ -1163,6 +1231,7 @@ instance Ord Byets where
                0 -> compare aL bL
                x -> compare x 0
 
+
 -- | __Constant time__. A bit more efficient than the default instance.
 instance {-# OVERLAPS #-} Access (Sized len Byets)
   => Eq (Sized len Byets) where
@@ -1184,6 +1253,8 @@ instance GetLength Byets where
   type MinLength Byets = 0
   type MaxLength Byets = MaxInt
   length (Byets len _) = len
+
+instance Poke Byets
 
 instance Access Byets where
   access (Byets _ fp) g = withForeignPtr fp g
