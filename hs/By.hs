@@ -807,16 +807,19 @@ concat as = do
 
 --------------------------------------------------------------------------------
 
--- -- | Interpreted as 'nullPtr'.
--- instance GetLength () where
---   type MinLength () = 0
---   type MaxLength () = 0
---   length () = I.known @0
---
--- -- | Interpreted as 'nullPtr'.
--- instance Alloc () where
---   alloc _ g = do a <- g nullPtr
---                  pure ((), a)
+-- Silly instance just to make sure we don't go making assumptions
+-- about 'MinLength'.
+
+-- | Interpreted as 'nullPtr'.
+instance GetLength () where
+  type MinLength () = 0
+  type MaxLength () = 0
+  length () = I.known @0
+
+-- | Interpreted as 'nullPtr'.
+instance Alloc () where
+  alloc _ g = do a <- g nullPtr
+                 pure ((), a)
 
 --------------------------------------------------------------------------------
 
