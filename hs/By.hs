@@ -3,6 +3,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
+#include <MachDeps.h>
+
 module By {--}
   ( -- * Length
     GetLength (..)
@@ -89,10 +91,15 @@ module By {--}
   , concat
 
   -- * Endiannes
-  , Endian(..)
+  , HostByteOrder
   , Size
+  , Endian(..)
+  , encodeLE
+  , decodeLE
+  , encodeBE
+  , decodeBE
 
-  -- * Numbers
+  -- * Intervals
   , LengthInterval
   , SliceInterval
   , IndexInterval
@@ -101,8 +108,6 @@ module By {--}
   , lengthToSlice
   ) --}
   where
-
-#include <MachDeps.h>
 
 import Control.Exception as Ex
 import Control.Monad
@@ -135,6 +140,7 @@ import Foreign.Marshal.Utils qualified as A
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import Foreign.Storable (Storable)
 import Foreign.Storable qualified as Sto
+import GHC.ByteOrder (ByteOrder(..))
 import GHC.ForeignPtr
 import GHC.TypeLits qualified as GHC
 import GHC.TypeNats
@@ -171,10 +177,10 @@ indexFromSlice
   :: forall t. (GetLength t) => SliceInterval t -> Maybe (IndexInterval t)
 {-# NOINLINE indexFromSlice #-} -- so that the Dict stuff happens only once
 indexFromSlice = fromMaybe (const Nothing) $ do
-  Dict <- le @1 @(MaxLength t)
+  Dict <- leNatural @1 @(MaxLength t)
   Dict <- pure $ evidence (minusNat @(MaxLength t) @1)
-  Dict <- le @0 @(MaxLength t - 1)
-  Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
+  Dict <- leNatural @0 @(MaxLength t - 1)
+  Dict <- leNatural @(MaxLength t - 1) @(I.MaxT CSize)
   pure $ \s -> case iToCSize s of
     n | n > 0 -> I.from (n - 1)
     _ -> error "indexFromSlice: impossible?"
@@ -274,10 +280,10 @@ null t = iToCSize (length t) == 0
 first :: forall t. (GetLength t) => t -> Maybe (IndexInterval t)
 {-# NOINLINE first #-} -- so that the Dict stuff happens only once
 first = fromMaybe (const Nothing) $ do
-  Dict <- le @1 @(MaxLength t)
+  Dict <- leNatural @1 @(MaxLength t)
   Dict <- pure $ evidence (minusNat @(MaxLength t) @1)
-  Dict <- le @0 @(MaxLength t - 1)
-  Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
+  Dict <- leNatural @0 @(MaxLength t - 1)
+  Dict <- leNatural @(MaxLength t - 1) @(I.MaxT CSize)
   pure $ \t -> do guard (not (By.null t))
                   pure (I.known @0)
 
@@ -672,7 +678,7 @@ drop = fromMaybe (\_ _ -> Nothing) $ do
   Dict <- pure $ evidence (minusNat @(MaxLength a) @1)
   Dict <- pure $ evidence (zeroLe @(MaxLength a - 1))
   Dict <- pure $ evidence (zeroLe @(MaxLength a))
-  Dict <- le @(MaxLength a - 1) @(I.MaxT CSize)
+  Dict <- leNatural @(MaxLength a - 1) @(I.MaxT CSize)
   pure $ \preSa a -> do
     -- preSa is 1 past the last index of the prefix,
     -- so it coincides with the first index of the suffix.
@@ -929,8 +935,8 @@ instance
   poke (Sized s) dP = poke s dP
   pokeFromTo from to = \(Sized s) ->
     withDict (minusNat @(MaxLength t) @1) $ do
-      Dict <- le @0 @(MaxLength t - 1)
-      Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
+      Dict <- leNatural @0 @(MaxLength t - 1)
+      Dict <- leNatural @(MaxLength t - 1) @(I.MaxT CSize)
       -- TODO upcast instead of downcast
       from' <- I.down from
       to' <- I.down to
@@ -1023,8 +1029,8 @@ withSizedMinMax
        -> a )
   -> Maybe a
 withSizedMinMax t g = I.with (length t) $ \(Proxy @len) -> do
-  Dict <- le @min @len
-  Dict <- le @len @max
+  Dict <- leNatural @min @len
+  Dict <- leNatural @len @max
   withDict (zeroLe @len) $
     withDict (leTrans @len @(MaxLength t) @(KI.Abs (I.MaxT Int))) $
       withDict (leTrans @len @(KI.Abs (I.MaxT Int)) @(I.MaxT CSize)) $
@@ -1083,58 +1089,74 @@ type instance Size Word = Size Word32
 
 --------------------------------------------------------------------------------
 
--- | Conversion between host byte encoding and Little-Endian or
--- Big-Endian byte encoding.
+-- | Conversion between 'HostByteOrder' and 'LittleEndian' or
+-- 'BigEndian' byte order.
 class (KnownNat (Size a), Size a <= KI.Abs (I.MaxT Int)) => Endian a where
   {-# MINIMAL hToLE, hToBE, leToH, beToH #-}
-  -- | From host encoding to Little-Endian encoding.
-  hToLE :: a -> Tagged "LE" a
-  -- | From host encoding to Big-Endian encoding.
-  hToBE :: a -> Tagged "BE" a
-  -- | From Little-Endian encoding to host encoding.
-  leToH :: Tagged "LE" a -> a
-  -- | From Big-Endian encoding to host encoding.
-  beToH :: Tagged "BE" a -> a
+  -- | From 'HostByteOrder' to 'LittleEndian' byte order.
+  hToLE :: a -> Tagged 'LittleEndian a
+  -- | From 'HostByteOrder' to 'BigEndian' byte order.
+  hToBE :: a -> Tagged 'BigEndian a
+  -- | From 'LittleEndian' byte order to 'HostByteOrder'.
+  leToH :: Tagged 'LittleEndian a -> a
+  -- | From 'BigEndian' byte order to 'HostByteOrder'.
+  beToH :: Tagged 'BigEndian a -> a
 
-  -- | Writes @a@ in @h@ using the host encoding.
-  encodeH
-    :: forall h. (Alloc h, MinLength h <= Size a, Size a <= MaxLength h)
-    => a -> h
-  -- | Default implementation in case there is a @'Storable' a@ instance.
-  default encodeH
-    :: forall h
-    .  (Alloc h, MinLength h <= Size a, Size a <= MaxLength h, Storable a)
-    => a -> h
-  encodeH = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
-                  Sto.poke (castPtr p) a
+  -- | Write @a@ into the 'Ptr' as @'Size' a@ bytes in 'LittleEndian' byte order.
+  -- The input @a@ is in 'HostByteOrder'.
+  pokeLE :: Ptr (Tagged 'LittleEndian a) -> a -> IO ()
+  default pokeLE :: Storable a => Ptr (Tagged 'LittleEndian a) -> a -> IO ()
+  pokeLE p = Sto.poke p . hToLE
+  {-# INLINE pokeLE #-}
 
-  -- | Writes @a@ in @le@ using Litle-Endian encoding.
-  encodeLE
-    :: forall le. (Alloc le, MinLength le <= Size a, Size a <= MaxLength le)
-    => a -> le
-  encodeLE = encodeH . unTagged . hToLE
+  -- | Read @a@ from the 'Ptr' containing @'Size' a@ bytes in 'LittleEndian' byte order.
+  -- The output @a@ is in 'HostByteOrder'.
+  peekLE :: Ptr (Tagged 'LittleEndian a) -> IO a
+  default peekLE :: Storable a => Ptr (Tagged 'LittleEndian a) -> IO a
+  peekLE = fmap leToH . Sto.peek
+  {-# INLINE peekLE #-}
 
-  -- | Writes @a@ in @be@ using Big-Endian encoding.
-  encodeBE
-    :: forall be. (Alloc be, MinLength be <= Size a, Size a <= MaxLength be)
-    => a -> be
-  encodeBE = encodeH . unTagged . hToBE
+  -- | Write @a@ into the 'Ptr' as @'Size' a@ bytes in 'BigEndian' byte order.
+  -- The input @a@ is in 'HostByteOrder'.
+  pokeBE :: Ptr (Tagged 'BigEndian a) -> a -> IO ()
+  default pokeBE :: Storable a => Ptr (Tagged 'BigEndian a) -> a -> IO ()
+  pokeBE p = Sto.poke p . hToBE
+  {-# INLINE pokeBE #-}
 
-  -- | Reads @a@ from @h@ using the host encoding.
-  decodeH :: forall h. (Read h, Size a ~ Length h) => h -> a
-  -- | Default implementation in case there is a @'Storable' a@ instance.
-  default decodeH
-    :: forall h. (Read h, Size a ~ Length h, Storable a) => h -> a
-  decodeH h = unsafeRead h (Sto.peek . castPtr)
-  {-# NOINLINE decodeH #-}
+  -- | Read @a@ from the 'Ptr' containing @'Size' a@ bytes in 'BigEndian' byte order.
+  -- The output @a@ is in 'HostByteOrder'.
+  peekBE :: Ptr (Tagged 'BigEndian a) -> IO a
+  default peekBE :: Storable a => Ptr (Tagged 'BigEndian a) -> IO a
+  peekBE = fmap beToH . Sto.peek
+  {-# INLINE peekBE #-}
 
-  -- | Reads @a@ from @le@ using Little-Endian encoding.
-  decodeLE :: forall le. (Read le, Size a ~ Length le) => le -> a
-  decodeLE = leToH . Tagged . decodeH
+-- | Encodes @a@ as @leNatural@ using 'LittleEndian' byte order.
+-- The input @a@ is in 'HostByteOrder'.
+encodeLE
+  :: forall a le
+  .  (Endian a, Alloc le, MinLength le <= Size a, Size a <= MaxLength le)
+  => a -> le
+encodeLE = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
+                 pokeLE (castPtr p) a
 
-  -- | Reads @a@ from @be@ using Big-Endian encoding.
-  decodeBE :: forall be. (Read be, Size a ~ Length be) => be -> a
-  decodeBE = beToH . Tagged . decodeH
+-- | Writes @a@ in @be@ using 'BigEndian' byte order.
+-- The input @a@ is in 'HostByteOrder'.
+encodeBE
+  :: forall a be
+  .  (Endian a, Alloc be, MinLength be <= Size a, Size a <= MaxLength be)
+  => a -> be
+encodeBE = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
+                 pokeBE (castPtr p) a
+
+-- | Reads @a@ from @le@ using 'LittleEndian' byte order.
+-- The output @a@ is in 'HostByteOrder'.
+decodeLE :: forall le a. (Endian a, Read le, Size a ~ Length le) => le -> a
+decodeLE le = unsafeRead le (peekLE . castPtr)
+
+-- | Reads @a@ from @be@ using 'BigEndian' byte order.
+-- The output @a@ is in 'HostByteOrder'.
+decodeBE :: forall be a. (Endian a, Read be, Size a ~ Length be) => be -> a
+decodeBE le = unsafeRead le (peekBE . castPtr)
 
 instance Endian Word8 where
   hToLE = coerce
@@ -1200,12 +1222,12 @@ instance Endian Word where
 #if WORD_SIZE_IN_BITS == 64
   hToLE = fmap (fromIntegral @Word64) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word64) . hToBE . fromIntegral
-  leToH = fromIntegral @Word64 . beToH . fromIntegral . unTagged
+  leToH = fromIntegral @Word64 . leToH . fromIntegral . unTagged
   beToH = fromIntegral @Word64 . beToH . fromIntegral . unTagged
 #elif WORD_SIZE_IN_BITS == 32
   hToLE = fmap (fromIntegral @Word32) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word32) . hToBE . fromIntegral
-  leToH = fromIntegral @Word32 . beToH . fromIntegral . unTagged
+  leToH = fromIntegral @Word32 . leToH . fromIntegral . unTagged
   beToH = fromIntegral @Word32 . beToH . fromIntegral . unTagged
 #endif
 
@@ -1227,6 +1249,7 @@ htobe32 = id
 be32toh = id
 htobe64 = id
 be64toh = id
+type HostByteOrder = 'BigEndian :: ByteOrder
 #else
 htobe16 = byteSwap16
 be16toh = byteSwap16
@@ -1240,6 +1263,7 @@ htole32 = id
 le32toh = id
 htole64 = id
 le64toh = id
+type HostByteOrder = 'LittleEndian :: ByteOrder
 #endif
 
 
@@ -1577,10 +1601,8 @@ iToInteger = fromIntegral . iToCSize
 
 --------------------------------------------------------------------------------
 
-le :: forall l r
-   .  (KnownNat l, KnownNat r)
-   => Maybe (Dict (l <= r))
-le = case cmpNat (Proxy @l) (Proxy @r) of
+leNatural :: forall l r. (KnownNat l, KnownNat r) => Maybe (Dict (l <= r))
+leNatural = case cmpNat (Proxy @l) (Proxy @r) of
   EQI -> Just $ unsafeCoerce (Dict @())
   LTI -> Just $ unsafeCoerce (Dict @())
   GTI -> Nothing

@@ -1,4 +1,7 @@
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds -Wno-incomplete-uni-patterns #-}
+
+#include <MachDeps.h>
 
 module Main (main) where
 
@@ -206,6 +209,13 @@ tt_toFrom =
       , testCase "encodeLE" $ By.encodeLE w64 @?= le64
       , testCase "encodeBE" $ By.encodeBE w64 @?= be64
       ]
+    , testGroup
+      "Word"
+      [ testCase "decodeLE" $ By.decodeLE le @?= w
+      , testCase "decodeBE" $ By.decodeBE be @?= w
+      , testCase "encodeLE" $ By.encodeLE w @?= le
+      , testCase "encodeBE" $ By.encodeBE w @?= be
+      ]
 
 --    , testCase "fromWord8" $ By.fromWord8 w8 @?= b8
 --    , testProperty "Word8" $
@@ -261,6 +271,16 @@ tt_toFrom =
     w64 = 0x0123456789abcdef :: Word64
     Just be64 = By.sized @8 (B8.pack "\x01\x23\x45\x67\x89\xAB\xCD\xEF")
     Just le64 = By.sized @8 (B8.pack "\xEF\xCD\xAB\x89\x67\x45\x23\x01")
+#if WORD_SIZE_IN_BITS == 64
+    w = 0x0123456789abcdef :: Word
+    Just be = By.sized @8 (B8.pack "\x01\x23\x45\x67\x89\xAB\xCD\xEF")
+    Just le = By.sized @8 (B8.pack "\xEF\xCD\xAB\x89\x67\x45\x23\x01")
+#elif WORD_SIZE_IN_BITS == 32
+    w = 0x01234567 :: Word
+    Just be = By.sized @4 (B8.pack "\x01\x23\x45\x67")
+    Just le = By.sized @4 (B8.pack "\x67\x45\x23\x01")
+#endif
+
 
 genSizedByteString
   :: forall len m
