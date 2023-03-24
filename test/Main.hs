@@ -206,6 +206,7 @@ tt_toFrom =
       , testCase "encodeLE" $ By.encodeLE w64 @?= le64
       , testCase "encodeBE" $ By.encodeBE w64 @?= be64
       ]
+
 --    , testCase "fromWord8" $ By.fromWord8 w8 @?= b8
 --    , testProperty "Word8" $
 --        property $ do

@@ -11,6 +11,7 @@ module By {--}
   , first
   , last
   , null
+
     -- ** Known
   , KnownLength(..)
   , lengthN
@@ -97,6 +98,7 @@ module By {--}
   , IndexInterval
   , indexFromSlice
   , sliceFromIndex
+  , lengthToSlice
   ) --}
   where
 
@@ -181,7 +183,7 @@ indexFromSlice = fromMaybe (const Nothing) $ do
 --
 -- __NB__: When using this function, many times you will need to
 -- specify @t@ using @-XTypeApplications@. Otherwise this won't
--- type-check because neither 'SliceInterval' nor 'IndexInterval'
+-- type-check because neither 'IndexInterval' nor 'SliceInterval'
 -- are injective type families.
 sliceFromIndex
   :: forall t. (GetLength t) => IndexInterval t -> Maybe (SliceInterval t)
@@ -190,6 +192,13 @@ sliceFromIndex = withDict (zeroLe @(MaxLength t)) $ \s ->
     n | n < maxBound -> I.from (n + 1)
     _ -> error "sliceFromIndex: impossible?"
 
+-- | 'I.Up'cast a 'LengthInterval' so that it can be typechecked as a
+-- 'SliceInterval'.
+--
+-- __NB__: When using this function, many times you will need to
+-- specify @t@ using @-XTypeApplications@. Otherwise this won't
+-- type-check because neither 'LengthInterval' nor 'SliceInterval'
+-- are injective type families.
 lengthToSlice
   :: forall t. (GetLength t) => LengthInterval t -> SliceInterval t
 lengthToSlice = withDict (zeroLe @(MaxLength t)) I.up
@@ -260,6 +269,8 @@ null :: forall t. (GetLength t) => t -> Bool
 null t = iToCSize (length t) == 0
 
 -- | Index to the first byte in @t@, if not 'null'.
+--
+-- So, this is either 'Nothing' or @'Just' 0@.
 first :: forall t. (GetLength t) => t -> Maybe (IndexInterval t)
 {-# NOINLINE first #-} -- so that the Dict stuff happens only once
 first = fromMaybe (const Nothing) $ do
@@ -903,6 +914,7 @@ addForeignPtrFinalizersMemzero e fp@(ForeignPtr _ x) = do
 
 --------------------------------------------------------------------------------
 
+-- | A @t@ whose 'length' is known to be @len@.
 newtype Sized (len :: Natural) t = Sized t
   deriving newtype (Show)
 
@@ -957,6 +969,7 @@ instance KnownLength (Sized len B.ByteString)
   get = fmap Sized $ Bin.getByteString $
           iToInt $ lengthN @(Sized len B.ByteString)
 
+-- | Remove the 'Sized' wraper.
 unSized :: Sized len t -> t
 unSized = coerce
 {-# INLINE unSized #-}
@@ -980,6 +993,7 @@ unsafeSized
   -> Sized len t
 unsafeSized = fromMaybe (error "By.unsafeSized") . sized
 
+-- | Wrap the @t@ in a 'Sized', bringing to scope proofs of its length.
 withSized
   :: forall t a
   .  GetLength t
@@ -993,7 +1007,8 @@ withSized
   -> a
 withSized = withSizedMinMaxN @(MinLength t) @(MaxLength t)
 
--- | Wrap the @t@ in a 'Sized' of some unknown length within @min@ and @max@.
+-- | Wrap the @t@ in a 'Sized' of some unknown length within @min@ and @max@,
+-- | bringing to scope proofs of its length.
 withSizedMinMax
   :: forall min max t a
   .  ( GetLength t
@@ -1015,7 +1030,8 @@ withSizedMinMax t g = I.with (length t) $ \(Proxy @len) -> do
       withDict (leTrans @len @(KI.Abs (I.MaxT Int)) @(I.MaxT CSize)) $
         pure $ g (Sized t :: Sized len t)
 
--- | Wrap the @t@ in a 'Sized' of length known to be within @min@ and @max@.
+-- | Wrap the @t@ in a 'Sized' of length known to be within @min@ and @max@,
+-- | bringing to scope proofs of its length.
 withSizedMinMaxN
   :: forall min max t a
   .  ( GetLength t
@@ -1042,7 +1058,7 @@ withSizedMinMaxN t f =
 
 --------------------------------------------------------------------------------
 
--- | The size in bytes of a value of type @a@. As in 'sizeOf'.
+-- | The size in bytes of a value of type @a@. As in 'Data.Storable.sizeOf'.
 type family Size (a :: Type) :: Natural
 
 type instance Size Word8  = 1
@@ -1144,7 +1160,6 @@ instance Endian Word64 where
   leToH = coerce le64toh
   beToH = coerce be64toh
 
--- | This instance is machine-dependent.
 instance Endian Int where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
@@ -1175,14 +1190,12 @@ instance Endian Int64 where
   leToH = fromIntegral . le64toh . fromIntegral . unTagged
   beToH = fromIntegral . be64toh . fromIntegral . unTagged
 
--- | This instance is machine-dependent.
 instance Endian CSize where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
   leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
   beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
 
--- | This instance is machine-dependent.
 instance Endian Word where
 #if WORD_SIZE_IN_BITS == 64
   hToLE = fmap (fromIntegral @Word64) . hToLE . fromIntegral
