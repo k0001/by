@@ -5,24 +5,26 @@
 
 module Main (main) where
 
-import qualified By
+import By qualified
 import Control.Monad
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as B8
+import Data.ByteString qualified as B
+import Data.ByteString.Char8 qualified as B8
 import Data.Constraint
+import Data.Int
 import Data.Maybe
 import Data.Proxy
 import Data.Word
 import Data.Type.Ord
+import Foreign.C.Types
 import GHC.TypeNats
 import Hedgehog (MonadGen, forAll, property, (===))
-import qualified Hedgehog.Gen as Gen
-import qualified Hedgehog.Range as Range
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
 import Test.Tasty (TestTree, testGroup)
-import qualified Test.Tasty as Tasty
+import Test.Tasty qualified as Tasty
 import Test.Tasty.HUnit (testCase, (@?=), (@=?))
 import Test.Tasty.Hedgehog (HedgehogTestLimit (..), testProperty)
-import qualified Test.Tasty.Runners as Tasty
+import Test.Tasty.Runners qualified as Tasty
 import Unsafe.Coerce (unsafeCoerce)
 
 --------------------------------------------------------------------------------
@@ -191,16 +193,25 @@ tt_toFrom =
       "Word8"
       [ testCase "decodeLE" $ By.decodeLE b8 @?= w8
       , testCase "decodeBE" $ By.decodeBE b8 @?= w8
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.word8 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 1 By.Byets)
       ]
     , testGroup
       "Word16"
       [ testCase "decodeLE" $ By.decodeLE le16 @?= w16
       , testCase "decodeBE" $ By.decodeBE be16 @?= w16
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.word16 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 2 By.Byets)
       ]
     , testGroup
       "Word32"
       [ testCase "decodeLE" $ By.decodeLE le32 @?= w32
       , testCase "decodeBE" $ By.decodeBE be32 @?= w32
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.word32 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 4 By.Byets)
       ]
     , testGroup
       "Word64"
@@ -208,6 +219,9 @@ tt_toFrom =
       , testCase "decodeBE" $ By.decodeBE be64 @?= w64
       , testCase "encodeLE" $ By.encodeLE w64 @?= le64
       , testCase "encodeBE" $ By.encodeBE w64 @?= be64
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.word64 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 8 By.Byets)
       ]
     , testGroup
       "Word"
@@ -215,68 +229,95 @@ tt_toFrom =
       , testCase "decodeBE" $ By.decodeBE be @?= w
       , testCase "encodeLE" $ By.encodeLE w @?= le
       , testCase "encodeBE" $ By.encodeBE w @?= be
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized (By.Size Word) By.Byets)
       ]
-
---    , testCase "fromWord8" $ By.fromWord8 w8 @?= b8
---    , testProperty "Word8" $
---        property $ do
---          x <- forAll $ Gen.word8 Range.constantBounded
---          x === By.toWord8 (By.fromWord8 x `asTypeOf` b8)
---    , testCase "toWord16le" $ By.toWord16le le16 @?= w16
---    , testCase "fromWord16le" $ By.fromWord16le w16 @?= le16
---    , testProperty "Word16le" $
---        property $ do
---          x <- forAll $ Gen.word16 Range.constantBounded
---          x === By.toWord16le (By.fromWord16le x `asTypeOf` le16)
---    , testCase "toWord16be" $ By.toWord16be be16 @?= w16
---    , testCase "fromWord16be" $ By.fromWord16be w16 @?= be16
---    , testProperty "Word16be" $
---        property $ do
---          x <- forAll $ Gen.word16 Range.constantBounded
---          x === By.toWord16be (By.fromWord16be x `asTypeOf` be16)
---    , testCase "toWord32le" $ By.toWord32le le32 @?= w32
---    , testCase "fromWord32le" $ By.fromWord32le w32 @?= le32
---    , testProperty "Word32le" $
---        property $ do
---          x <- forAll $ Gen.word32 Range.constantBounded
---          x === By.toWord32le (By.fromWord32le x `asTypeOf` le32)
---    , testCase "toWord32be" $ By.toWord32be be32 @?= w32
---    , testCase "fromWord32be" $ By.fromWord32be w32 @?= be32
---    , testProperty "Word32be" $
---        property $ do
---          x <- forAll $ Gen.word32 Range.constantBounded
---          x === By.toWord32be (By.fromWord32be x `asTypeOf` be32)
---    , testCase "toWord64le" $ By.toWord64le le64 @?= w64
---    , testCase "fromWord64le" $ By.fromWord64le w64 @?= le64
---    , testProperty "Word64le" $
---        property $ do
---          x <- forAll $ Gen.word64 Range.constantBounded
---          x === By.toWord64le (By.fromWord64le x `asTypeOf` le64)
---    , testCase "toWord64be" $ By.toWord64be be64 @?= w64
---    , testCase "fromWord64be" $ By.fromWord64be w64 @?= be64
---    , testProperty "Word64be" $
---        property $ do
---          x <- forAll $ Gen.word64 Range.constantBounded
---          x === By.toWord64be (By.fromWord64be x `asTypeOf` be64)
+    , testGroup
+      "Int8"
+      [ testCase "decodeLE" $ By.decodeLE b8 @?= i8
+      , testCase "decodeBE" $ By.decodeBE b8 @?= i8
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int8 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 1 By.Byets)
+      ]
+    , testGroup
+      "Int16"
+      [ testCase "decodeLE" $ By.decodeLE le16 @?= i16
+      , testCase "decodeBE" $ By.decodeBE be16 @?= i16
+      , testCase "encodeLE" $ By.encodeLE i16 @?= le16
+      , testCase "encodeBE" $ By.encodeBE i16 @?= be16
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int16 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 2 By.Byets)
+      ]
+    , testGroup
+      "Int32"
+      [ testCase "decodeLE" $ By.decodeLE le32 @?= i32
+      , testCase "decodeBE" $ By.decodeBE be32 @?= i32
+      , testCase "encodeLE" $ By.encodeLE i32 @?= le32
+      , testCase "encodeBE" $ By.encodeBE i32 @?= be32
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int32 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 4 By.Byets)
+      ]
+    , testGroup
+      "Int64"
+      [ testCase "decodeLE" $ By.decodeLE le64 @?= i64
+      , testCase "decodeBE" $ By.decodeBE be64 @?= i64
+      , testCase "encodeLE" $ By.encodeLE i64 @?= le64
+      , testCase "encodeBE" $ By.encodeBE i64 @?= be64
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int64 Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized 8 By.Byets)
+      ]
+    , testGroup
+      "Int"
+      [ testCase "decodeLE" $ By.decodeLE le @?= i
+      , testCase "decodeBE" $ By.decodeBE be @?= i
+      , testCase "encodeLE" $ By.encodeLE i @?= le
+      , testCase "encodeBE" $ By.encodeBE i @?= be
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x <- forAll $ Gen.int Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized (By.Size Int) By.Byets)
+      ]
+    , testGroup
+      "CSize"
+      [ testCase "decodeLE" $ By.decodeLE le @?= cs
+      , testCase "decodeBE" $ By.decodeBE be @?= cs
+      , testCase "encodeLE" $ By.encodeLE cs @?= le
+      , testCase "encodeBE" $ By.encodeBE cs @?= be
+      , testProperty "decodeLE . encodeLE" $ property $ do
+          x :: CSize <- forAll $ Gen.integral Range.constantBounded
+          x === By.decodeLE (By.encodeLE x :: By.Sized (By.Size CSize) By.Byets)
+      ]
     ]
   where
     w8 = 0x01 :: Word8
+    i8 = 0x01 :: Int8
     Just b8 = By.sized @1 (B8.pack "\x01")
     w16 = 0x0123 :: Word16
+    i16 = 0x0123 :: Int16
     Just be16 = By.sized @2 (B8.pack "\x01\x23")
     Just le16 = By.sized @2 (B8.pack "\x23\x01")
     w32 = 0x01234567 :: Word32
+    i32 = 0x01234567 :: Int32
     Just be32 = By.sized @4 (B8.pack "\x01\x23\x45\x67")
     Just le32 = By.sized @4 (B8.pack "\x67\x45\x23\x01")
     w64 = 0x0123456789abcdef :: Word64
+    i64 = 0x0123456789abcdef :: Int64
     Just be64 = By.sized @8 (B8.pack "\x01\x23\x45\x67\x89\xAB\xCD\xEF")
     Just le64 = By.sized @8 (B8.pack "\xEF\xCD\xAB\x89\x67\x45\x23\x01")
 #if WORD_SIZE_IN_BITS == 64
+    cs = 0x0123456789abcdef :: CSize
     w = 0x0123456789abcdef :: Word
+    i = 0x0123456789abcdef :: Int
     Just be = By.sized @8 (B8.pack "\x01\x23\x45\x67\x89\xAB\xCD\xEF")
     Just le = By.sized @8 (B8.pack "\xEF\xCD\xAB\x89\x67\x45\x23\x01")
 #elif WORD_SIZE_IN_BITS == 32
+    cs = 0x01234567 :: CSize
     w = 0x01234567 :: Word
+    i = 0x01234567 :: Int
     Just be = By.sized @4 (B8.pack "\x01\x23\x45\x67")
     Just le = By.sized @4 (B8.pack "\x67\x45\x23\x01")
 #endif

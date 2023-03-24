@@ -1091,7 +1091,7 @@ type instance Size Word = Size Word32
 
 -- | Conversion between 'HostByteOrder' and 'LittleEndian' or
 -- 'BigEndian' byte order.
-class (KnownNat (Size a), Size a <= KI.Abs (I.MaxT Int)) => Endian a where
+class Endian a where
   {-# MINIMAL hToLE, hToBE, leToH, beToH #-}
   -- | From 'HostByteOrder' to 'LittleEndian' byte order.
   hToLE :: a -> Tagged 'LittleEndian a
@@ -1134,7 +1134,8 @@ class (KnownNat (Size a), Size a <= KI.Abs (I.MaxT Int)) => Endian a where
 -- The input @a@ is in 'HostByteOrder'.
 encodeLE
   :: forall a le
-  .  (Endian a, Alloc le, MinLength le <= Size a, Size a <= MaxLength le)
+  .  ( Endian a, Alloc le, KnownNat (Size a)
+     , MinLength le <= Size a, Size a <= MaxLength le )
   => a -> le
 encodeLE = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
                  pokeLE (castPtr p) a
@@ -1143,7 +1144,8 @@ encodeLE = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
 -- The input @a@ is in 'HostByteOrder'.
 encodeBE
   :: forall a be
-  .  (Endian a, Alloc be, MinLength be <= Size a, Size a <= MaxLength be)
+  .  ( Endian a, Alloc be, KnownNat (Size a)
+     , MinLength be <= Size a, Size a <= MaxLength be )
   => a -> be
 encodeBE = \a -> unsafeAlloc_ (I.known @(Size a)) $ \p ->
                  pokeBE (castPtr p) a
@@ -1185,7 +1187,7 @@ instance Endian Word64 where
 instance Endian Int where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
-  leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+  leToH = fromIntegral @Word . leToH . fromIntegral . unTagged
   beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
 
 instance Endian Int8 where
@@ -1215,7 +1217,7 @@ instance Endian Int64 where
 instance Endian CSize where
   hToLE = fmap (fromIntegral @Word) . hToLE . fromIntegral
   hToBE = fmap (fromIntegral @Word) . hToBE . fromIntegral
-  leToH = fromIntegral @Word . beToH . fromIntegral . unTagged
+  leToH = fromIntegral @Word . leToH . fromIntegral . unTagged
   beToH = fromIntegral @Word . beToH . fromIntegral . unTagged
 
 instance Endian Word where
