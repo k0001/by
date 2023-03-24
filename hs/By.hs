@@ -289,9 +289,7 @@ first = fromMaybe (const Nothing) $ do
 
 -- | Index to the last byte in @t@, if not 'null'.
 last :: forall t. (GetLength t) => t -> Maybe (IndexInterval t)
-{-# NOINLINE last #-} -- so that the Dict stuff happens only once
-last = withDict (zeroLe @(MaxLength t)) $ \s ->
-         indexFromSlice @t (I.up (length s))
+last = indexFromSlice @t . I.up . length
 
 -- | Poke a copy of @t@'s bytes into a user-given address.
 class (GetLength t, 1 <= MaxLength t) => Copy t where
