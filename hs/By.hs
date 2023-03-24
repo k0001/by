@@ -1,28 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DefaultSignatures #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NoStarIsType #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
-
-#include <MachDeps.h>
 
 module By {--}
   ( -- * Length
@@ -62,6 +41,9 @@ module By {--}
   , Write
   , write
 
+    -- * Convert
+  , Convert (..)
+
     -- * Sized
   , Sized
   , unSized
@@ -73,6 +55,7 @@ module By {--}
 
     -- * Byets
   , Byets
+  , byteStringToByets
 
     -- * Base16
   , toBase16
@@ -115,12 +98,16 @@ module By {--}
   , indexFromSlice
   , sliceFromIndex
   ) --}
-where
+  where
 
+#include <MachDeps.h>
+
+import Control.Exception as Ex
 import Control.Monad
 import Data.Binary qualified as Bin
 import Data.Binary.Get qualified as Bin
 import Data.Binary.Put qualified as Bin
+import Data.Bits
 import Data.ByteString qualified as B
 import Data.ByteString.Internal qualified as BI
 import Data.Char (chr)
@@ -130,6 +117,7 @@ import Data.Constraint.Nat
 import Data.Constraint.Unsafe (unsafeCoerceConstraint)
 import Data.Foldable qualified as F
 import Data.Int
+import Data.IORef
 import Data.Kind
 import Data.Maybe (fromMaybe)
 import Data.Ord
@@ -137,14 +125,20 @@ import Data.Proxy
 import Data.String
 import Data.Tagged
 import Data.Type.Ord
+import Data.Type.Equality
 import Data.Word
 import Foreign.C.Types (CInt (..), CSize (..))
-import Foreign.ForeignPtr (ForeignPtr, withForeignPtr, newForeignPtr_)
+import Foreign.Marshal.Alloc qualified as A
+import Foreign.Marshal.Utils qualified as A
 import Foreign.Ptr (Ptr, nullPtr, plusPtr, castPtr)
 import Foreign.Storable (Storable)
 import Foreign.Storable qualified as Sto
+import GHC.ForeignPtr
 import GHC.TypeLits qualified as GHC
 import GHC.TypeNats
+import I (I)
+import I qualified
+import KindInteger qualified as KI
 import Memzero qualified
 import Prelude hiding (Read, concat, length, replicate, shows, showString, take,
   drop, splitAt, show, read, last, null)
@@ -153,21 +147,17 @@ import System.IO.Unsafe (unsafeDupablePerformIO, unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
 
-import By.Interval qualified as I
-import By.Interval (Interval, MaxInt)
-
 --------------------------------------------------------------------------------
 
-
 -- | Type suitable for measuring the 'length' of the bytes in @t@.
-type LengthInterval (t :: Type) = Interval (MinLength t) (MaxLength t)
+type LengthInterval (t :: Type) = I CSize (MinLength t) (MaxLength t)
 
 -- | Type suitable for measuring the length of a slice of the bytes in @t@,
 -- which may be shorter than 'MinLength'.
-type SliceInterval (t :: Type) = Interval 0 (MaxLength t)
+type SliceInterval (t :: Type) = I CSize 0 (MaxLength t)
 
 -- | Type suitable for indexing the bytes in @t@.
-type IndexInterval (t :: Type) = Interval 0 (MaxLength t - 1)
+type IndexInterval (t :: Type) = I CSize 0 (MaxLength t - 1)
 
 -- | Index corresponding to the last byte at the slice of the specified length.
 --
@@ -178,13 +168,14 @@ type IndexInterval (t :: Type) = Interval 0 (MaxLength t - 1)
 indexFromSlice
   :: forall t. (GetLength t) => SliceInterval t -> Maybe (IndexInterval t)
 {-# NOINLINE indexFromSlice #-} -- so that the Dict stuff happens only once
-indexFromSlice = case le @1 @(MaxLength t) of
-                   Nothing -> const Nothing
-                   Just Dict ->
-                     withDict (minusNat @(MaxLength t) @1) $ \l ->
-                       case I.toNatural l of
-                         0 -> Nothing
-                         n -> I.from (n - 1)
+indexFromSlice = fromMaybe (const Nothing) $ do
+  Dict <- le @1 @(MaxLength t)
+  Dict <- pure $ evidence (minusNat @(MaxLength t) @1)
+  Dict <- le @0 @(MaxLength t - 1)
+  Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
+  pure $ \s -> case iToCSize s of
+    n | n > 0 -> I.from (n - 1)
+    _ -> error "indexFromSlice: impossible?"
 
 -- | Length of the slice through to the byte at the specified index.
 --
@@ -194,17 +185,22 @@ indexFromSlice = case le @1 @(MaxLength t) of
 -- are injective type families.
 sliceFromIndex
   :: forall t. (GetLength t) => IndexInterval t -> Maybe (SliceInterval t)
-{-# INLINE sliceFromIndex #-}
-sliceFromIndex = I.from . succ . I.toNatural
+sliceFromIndex = withDict (zeroLe @(MaxLength t)) $ \s ->
+  case iToCSize s of
+    n | n < maxBound -> I.from (n + 1)
+    _ -> error "sliceFromIndex: impossible?"
 
---------------------------------------------------------------------------------
+lengthToSlice
+  :: forall t. (GetLength t) => LengthInterval t -> SliceInterval t
+lengthToSlice = withDict (zeroLe @(MaxLength t)) I.up
+
+-----------------------------------------------------------------------------
 
 -- | Runtime byte length discovery.
 class
-  ( KnownNat (MinLength t)
-  , KnownNat (MaxLength t)
-  , MinLength t <= MaxLength t
-  , MaxLength t <= MaxInt
+  ( MaxLength t <= KI.Abs (I.MaxT Int)
+  , I.Interval CSize (MinLength t) (MaxLength t)
+  , I.Interval CSize 0 (MaxLength t)
   ) => GetLength t where
   type MinLength (t :: Type) :: Natural
   type MaxLength (t :: Type) :: Natural
@@ -244,7 +240,7 @@ lengthN = I.known @(Length t)
 slice
   :: forall t. (GetLength t) => t -> IndexInterval t -> Maybe (SliceInterval t)
 slice t i = do s <- sliceFromIndex @t i
-               guard (I.toInteger s <= I.toInteger (length t))
+               guard (iToInteger s <= iToInteger (length t))
                pure s
 
 -- | Index corresponding to the last byte at the slice of the specified
@@ -256,30 +252,29 @@ slice t i = do s <- sliceFromIndex @t i
 -- In this example, slices 5 and over result in 'Nothing'.
 index
   :: forall t. (GetLength t) => t -> SliceInterval t -> Maybe (IndexInterval t)
-index t s = do guard (I.toInteger s <= I.toInteger (length t))
+index t s = do guard (iToInteger s <= iToInteger (length t))
                indexFromSlice @t s
 
 -- | Whether the runtime 'length' of @t@ is @0@.
 null :: forall t. (GetLength t) => t -> Bool
-null t = I.toNatural (length t) == 0
+null t = iToCSize (length t) == 0
 
 -- | Index to the first byte in @t@, if not 'null'.
 first :: forall t. (GetLength t) => t -> Maybe (IndexInterval t)
 {-# NOINLINE first #-} -- so that the Dict stuff happens only once
-first = case le @1 @(MaxLength t) of
-          Nothing -> const Nothing
-          Just Dict ->
-            withDict (zeroLe @(MaxLength t - 1)) $
-            withDict (minusNat @(MaxLength t) @1) $ \t -> do
-              guard (1 <= I.toNatural (length t))
-              Just (I.known @0)
+first = fromMaybe (const Nothing) $ do
+  Dict <- le @1 @(MaxLength t)
+  Dict <- pure $ evidence (minusNat @(MaxLength t) @1)
+  Dict <- le @0 @(MaxLength t - 1)
+  Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
+  pure $ \t -> do guard (not (By.null t))
+                  pure (I.known @0)
 
 -- | Index to the last byte in @t@, if not 'null'.
 last :: forall t. (GetLength t) => t -> Maybe (IndexInterval t)
 {-# NOINLINE last #-} -- so that the Dict stuff happens only once
-last = withDict (zeroLe @(MinLength t))
-     $ withDict (zeroLe @(MaxLength t))
-     $ indexFromSlice @t . I.upcast . length
+last = withDict (zeroLe @(MaxLength t)) $ \s ->
+         indexFromSlice @t (I.up (length s))
 
 -- | Poke a copy of @t@'s bytes into a user-given address.
 class (GetLength t, 1 <= MaxLength t) => Copy t where
@@ -351,7 +346,7 @@ mkPoke
 {-# INLINE mkPoke #-}
 mkPoke read_ = \s dP ->
   read_ s $ \sP ->
-  void $ c_memcpy dP sP (itoCSize (length s))
+  void $ c_memcpy dP sP (iToCSize (length s))
 
 -- | You can use @'mkPokeFromTo' f@ as definition of the 'pokeFromTo' method
 -- of the 'Copy' instance for your @t@.
@@ -376,13 +371,13 @@ mkPokeFromTo read_ = g
   where
     {-# NOINLINE g #-}
     g = withDict (minusLe @(MaxLength t) @1 @(MaxLength t))
-      $ withDict (leTrans @(MaxLength t - 1) @(MaxLength t) @MaxInt)
+      $ withDict (leTrans @(MaxLength t - 1) @(MaxLength t) @(KI.Abs (I.MaxT Int)))
       $ \from to s -> do
-           guard (I.toInt to < I.toInt (length s))
+           guard (iToInt to < iToInt (length s))
            guard (from <= to)
-           let len = itoCSize to - itoCSize from + 1
+           let len = iToCSize to - iToCSize from + 1
            pure $ \dP -> read_ s $ \sP ->
-             void $ c_memcpy dP (plusPtr sP (I.toInt from)) len
+             void $ c_memcpy dP (plusPtr sP (iToInt from)) len
 
 -- | @
 -- 'pokeFrom' from t == 'pokeFromTo' from ('last' t) t
@@ -407,9 +402,8 @@ pokeTo
   -> t
   -> Maybe (Ptr Word8 -> IO ())
 {-# NOINLINE pokeTo #-} -- so that the Dict stuff happens only once
-pokeTo = withDict (zeroLe @(MaxLength t - 1))
-       $ withDict (minusNat @(MaxLength t) @1)
-       $ pokeFromTo I.min
+pokeTo to t = do from <- first t
+                 pokeFromTo from to t
 
 -- | Raw access to the bytes of @t@ for __read-only__ purposes.
 class GetLength t => Read t where
@@ -421,7 +415,6 @@ class GetLength t => Read t where
        -> (Ptr Word8 -> IO a)
        -- ^ Read-only interaction with 'length' bytes starting at 'Ptr'.
        -> IO a
-
 
 -- | Raw access to the bytes of @t@ for __read-write__ purposes.
 class Read t => Write t
@@ -535,7 +528,7 @@ unsafeAllocN_ g = fst (unsafeAllocN g)
 -- | @'replicate' n x@ repeats @n@ times the byte @x@.
 replicate :: forall a. Alloc a => LengthInterval a -> Word8 -> a
 replicate len x = unsafeAlloc_ len $ \p ->
-                  c_memset p x (itoCSize len)
+                  c_memset p x (iToCSize len)
 
 -- | @'replicate' x@ repeats @'Length' a@ times the byte @x@.
 replicateN :: forall a. (Alloc a, KnownLength a) => Word8 -> a
@@ -543,7 +536,7 @@ replicateN = replicate (lengthN @a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@, if it would fit.
 copy :: forall a b. (Copy a, Alloc b) => a -> Maybe b
-copy a = do bL <- I.downcast (length a)
+copy a = do bL <- I.down (length a)
             pure $ unsafeAlloc_ bL (poke a)
 
 -- | @'copyN' a@ copies all of @a@ into a newly allocated @b@.
@@ -555,7 +548,7 @@ copyN
      , MaxLength a <= MaxLength b )
   => a
   -> b
-copyN a = unsafeAlloc_ (I.upcast (length a)) (poke a)
+copyN a = unsafeAlloc_ (I.up (length a)) (poke a)
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order, if it would fit in @c@.
@@ -568,10 +561,12 @@ append
   -> b
   -> Maybe c
 append a b = do
-  cL <- length a `I.plus` length b
+  aL' <- I.down (length a)
+  bL' <- I.down (length b)
+  cL  <- I.plus' aL' bL'
   pure $ unsafeAlloc_ cL $ \cP -> do
     poke a cP
-    poke b (plusPtr cP (I.toInt (length a)))
+    poke b (plusPtr cP (iToInt aL'))
 
 -- | @'append' a b@ allocates a new @c@ that contains the concatenation of
 -- @a@ and @b@, in that order.
@@ -585,17 +580,8 @@ appendN
   => a
   -> b
   -> c
-appendN a b = unsafeAlloc_ cL $ \cP -> do
-    poke a cP
-    poke b (plusPtr cP (I.toInt (length a)))
-  where
-    cL | SomeNat (_ :: Proxy cL) <-
-         someNatVal $ I.toNatural (length a)
-                    + I.toNatural (length b)
-       , Just Dict <- le @cL @(MaxLength c)
-       , Just Dict <- le @(MinLength c) @cL
-       = I.known @cL
-       | otherwise = error "By.append: impossible"
+appendN a b = fromMaybe (error "By.appendN: impossible")
+                        (append a b)
 
 -- | @'splitAt' n a@ copies the @n@ leading bytes of @a@ into a newly
 -- allocated @b@, and the trailing @'length' a - n@ bytes of @a@
@@ -626,7 +612,7 @@ splitAtN
   => a
   -> (b, c)
 splitAtN a = fromMaybe (error "splitAtN: impossible") $ do
-  preSa <- I.downcast (lengthN @b)
+  preSa <- I.down (lengthN @b)
   b <- take preSa a
   c <- drop preSa a
   pure (b, c)
@@ -641,7 +627,7 @@ take
   -> a
   -> Maybe b
 take bLsa a = do
-  bL :: LengthInterval b <- I.downcast bLsa
+  bL :: LengthInterval b <- I.down bLsa
   aTo :: IndexInterval a <- indexFromSlice @a bLsa
   pokeB <- pokeTo aTo a
   pure $ unsafeAlloc_ bL pokeB
@@ -656,9 +642,10 @@ takeN
      , Length b <= MinLength a )
   => a
   -> b
-takeN a = fromMaybe (error "By.takeN: impossible") $ do
-  bLa <- I.downcast (lengthN @b)
-  take bLa a
+takeN = withDict (zeroLe @(MaxLength a)) $ \a ->
+        fromMaybe (error "By.takeN: impossible") $ do
+           bLa <- I.down (lengthN @b)
+           take bLa a
 
 -- | @'drop' n a@ copies the @n@ trailing bytes of @a@ into a newly
 -- allocated @b@, if it would fit.
@@ -670,13 +657,19 @@ drop
   -> a
   -> Maybe b
 {-# NOINLINE drop #-} -- so that the Dict stuff happens only once
-drop = withDict (minusNat @(MaxLength a) @1) $ \preSa a -> do
-  -- preSa is 1 past the last index of the prefix,
-  -- so it coincides with the first index of the suffix.
-  aFrom :: IndexInterval a <- I.downcast preSa
-  bL :: LengthInterval b <- length a `I.minus` preSa
-  pokeB <- pokeFrom aFrom a
-  pure $ unsafeAlloc_ bL pokeB
+drop = fromMaybe (\_ _ -> Nothing) $ do
+  Dict <- pure $ evidence (minusNat @(MaxLength a) @1)
+  Dict <- pure $ evidence (zeroLe @(MaxLength a - 1))
+  Dict <- pure $ evidence (zeroLe @(MaxLength a))
+  Dict <- le @(MaxLength a - 1) @(I.MaxT CSize)
+  pure $ \preSa a -> do
+    -- preSa is 1 past the last index of the prefix,
+    -- so it coincides with the first index of the suffix.
+    let aL' :: SliceInterval a = lengthToSlice @a (length a)
+    bL :: LengthInterval b <- I.down =<< I.minus' aL' preSa
+    aFrom :: IndexInterval a <- I.down preSa
+    pokeB <- pokeFrom aFrom a
+    pure $ unsafeAlloc_ bL pokeB
 
 -- | @'dropN' a@ copies the trailing bytes of @a@ into a
 -- newly allocated @b@ of known length.
@@ -688,15 +681,18 @@ dropN
      , Length b <= MinLength a )
   => a
   -> b
-dropN a = fromMaybe (error "By.dropN: impossible") $ do
-  preSa <- length a `I.minus` lengthN @b
-  drop preSa a
+dropN = withDict (zeroLe @(MaxLength a)) $ \a ->
+  fromMaybe (error "By.dropN: impossible") $ do
+    let aL' :: SliceInterval a = lengthToSlice @a (length a)
+    bL' :: SliceInterval a <- I.down (lengthN @b)
+    preSa :: SliceInterval a <- I.minus' aL' bL'
+    drop preSa a
 
 -- | Allocate a new @a@ made up of the bytes in @f@.
 -- 'Nothing' if the result wouldn't fit in @a@.
 pack :: forall a f. (Alloc a, Foldable f) => f Word8 -> Maybe a
 pack ws = do
-  aL <- I.from (F.length ws)
+  aL <- I.from =<< toIntegralSized (F.length ws)
   pure $ unsafeAlloc_ aL $ \aP ->
          F.foldlM (\off w -> do c_memset (plusPtr aP off) w 1
                                 pure $! off + 1)
@@ -705,7 +701,7 @@ pack ws = do
 
 -- | List of bytes in @a@.
 unpack :: forall a. Read a => a -> [Word8]
-unpack a = unsafeRead a $ f (I.toInt (length a))
+unpack a = unsafeRead a $ f (iToInt (length a))
   where
     f :: Int -> Ptr Word8 -> IO [Word8]
     f 0 !_ = pure []
@@ -792,16 +788,17 @@ showStringBase16 = \u a ->
   where
     preLa0 :: SliceInterval a
     preLa0 = withDict (zeroLe @(MaxLength a))
-           $ I.clamp (16 * 1024 :: Int) -- Work in 16KiB chunks
+           $ I.clamp (16 * 1024 :: CSize) -- Work in 16KiB chunks
 
 -- | Concatenates all the @a@s. 'Nothing' if the result doesn't fit in @b@.
 concat :: forall a b f. (Copy a, Alloc b, Foldable f) => f a -> Maybe b
 concat as = do
   -- We add lengths as 'Integer' to avoid overflowing 'Int' while adding.
-  bL <- I.from $ F.foldl' (\ !z a -> z + I.toInteger (length a)) 0 as
+  bL <- I.from =<< toIntegralSized
+            (F.foldl' (\ !z a -> z + iToInteger (length a)) 0 as)
   pure $ unsafeAlloc_ bL $ \outP ->
          F.foldlM (\off a -> do poke a (plusPtr outP off)
-                                pure $! off + I.toInt (length a))
+                                pure $! off + iToInt (length a))
          0
          as
 
@@ -823,6 +820,89 @@ instance Alloc () where
 
 --------------------------------------------------------------------------------
 
+-- | Ad-hoc conversion between types __without copying__ the user data bytes.
+class (GetLength a, GetLength b) => Convert a b where
+   -- | Convert @a@ to @b@ __without copying__ the user data bytes.
+   --
+   -- * If the given @a@ fits in @b@, conversion must succeed.
+   --
+   -- * The 'length' of @a@ and @b@ must be equal.
+   --
+   -- * The underlying user bytes must be __shared__ by both @a@ and @b@.
+   --
+   -- * When both are successful, 'convert' and 'convertN' must give the same
+   -- result.
+  convert :: a -> Maybe b
+  default convert
+    :: (MinLength b <= MinLength a, MaxLength a <= MaxLength b) => a -> Maybe b
+  convert = Just . convertN
+  -- | Like 'convert', but always succeeds because @a@ is known to fit in @b@.
+  convertN :: (MinLength b <= MinLength a, MaxLength a <= MaxLength b) => a -> b
+
+-- | @
+-- 'convert' == 'Just'
+-- 'convertN' == 'id'
+-- @
+instance (GetLength a) => Convert a a where
+  convertN = id
+  {-# INLINE convertN #-}
+
+instance (KnownLength (Sized len a), KnownLength (Sized len b), Convert a b)
+  => Convert (Sized len a) (Sized len b) where
+  convertN = \a -> case convert (unSized a) of
+    Just b | iToCSize (length a) == iToCSize (length b) -> Sized b
+    _ -> error "By.convert(Sized): impossible"
+
+-- | The obtained 'B.ByteString' preserves the memory-zeroing properties.
+-- 'convert' always returns 'Just'.
+--
+-- To convert a 'B.ByteString' to 'Bytes', see 'byteStringToByets'.
+instance Convert Byets B.ByteString where
+  convertN = \(Byets len fp) -> BI.BS fp (iToInt len)
+  {-# INLINE convertN #-}
+
+--------------------------------------------------------------------------------
+
+-- | Convert a 'B.ByteString' to 'Byets' without copying. The original
+-- 'B.ByteString' and the 'Bytes' share the underlying bytes, which will be
+-- zeroed once both the 'B.ByteString' and the 'Byets' become unreachable.
+--
+-- This runs on 'IO' because a zeroing finalizer is attached to the original
+-- 'B.ByteString'.
+byteStringToByets :: B.ByteString -> IO Byets
+byteStringToByets t@(BI.BS fp _) = do
+  _ <- addForeignPtrFinalizersMemzero (iToCSize (length t)) fp
+  pure (Byets (length t) fp)
+
+-- | Adds the "Memzero" wiping finalizer to the 'ForeignPtr'. It will wipe
+-- the given 'CSize' number of bytes starting at 'unsafeForeignPtrToPtr'.
+--
+-- If possible, the C finalizer will be used. Otherwise, the Haskell finalizer
+-- will be used.  Returns 'True' if a finalizer was installed, otherwise
+-- returns 'False' if the 'ForeignPtr' is a 'PlainPtr' or a 'FinalPtr'.
+--
+-- __WARNING__: The check to see which kind of finalizer we can add and the
+-- actual addition of the finalizer don't happen atommically.
+addForeignPtrFinalizersMemzero :: CSize -> ForeignPtr p -> IO Bool
+addForeignPtrFinalizersMemzero e fp@(ForeignPtr _ x) = do
+  let yiof = case x of
+        PlainForeignPtr iof -> Just iof
+        MallocPtr _ iof -> Just iof
+        PlainPtr _ -> Nothing
+        FinalPtr -> Nothing
+  case yiof of
+    Nothing -> pure False
+    Just iof -> do
+      readIORef iof >>= \case
+        HaskellFinalizers _ ->
+          addForeignPtrConcFinalizer fp $
+            Memzero.memzero' (unsafeForeignPtrToPtr fp) e
+        _ -> Ex.bracketOnError (A.new e) A.free $ \pe ->
+          addForeignPtrFinalizerEnv Memzero.finalizerEnvFree pe fp
+      pure True
+
+--------------------------------------------------------------------------------
+
 newtype Sized (len :: Natural) t = Sized t
   deriving newtype (Show)
 
@@ -837,10 +917,14 @@ instance
   poke (Sized s) dP = poke s dP
   pokeFromTo from to = \(Sized s) ->
     withDict (minusNat @(MaxLength t) @1) $ do
+      Dict <- le @0 @(MaxLength t - 1)
+      Dict <- le @(MaxLength t - 1) @(I.MaxT CSize)
       -- TODO upcast instead of downcast
-      from' <- I.downcast from
-      to' <- I.downcast to
+      from' <- I.down from
+      to' <- I.down to
       pokeFromTo from' to' s
+
+-- TODO: (a <= b) :- ((a - c) <= (b - c))
 
 deriving newtype instance
   ( GetLength (Sized len t)
@@ -848,11 +932,12 @@ deriving newtype instance
   ) => Read (Sized len t)
 
 instance
-  ( KnownNat len
-  , MinLength t <= len
+  ( MinLength t <= len
   , len <= MaxLength t
-  , len <= MaxInt )
-  => GetLength (Sized len t) where
+  , len <= KI.Abs (I.MaxT Int)
+  , I.Interval CSize len len
+  , I.Interval CSize 0 len
+  ) => GetLength (Sized len t) where
   type MinLength (Sized len t) = len
   type MaxLength (Sized len t) = len
 
@@ -863,14 +948,14 @@ instance
   , KnownLength (Sized len t)
   ) => Alloc (Sized len t) where
   alloc l g = do
-    (t, a) <- alloc (I.upcast l) g
+    (t, a) <- alloc (I.up l) g
     pure (Sized t, a)
 
 instance KnownLength (Sized len B.ByteString)
   => Bin.Binary (Sized len B.ByteString) where
   put (Sized t) = Bin.putByteString t
   get = fmap Sized $ Bin.getByteString $
-          I.toInt $ lengthN @(Sized len B.ByteString)
+          iToInt $ lengthN @(Sized len B.ByteString)
 
 unSized :: Sized len t -> t
 unSized = coerce
@@ -882,13 +967,9 @@ sized
   .  (KnownNat len, GetLength t)
   => t
   -> Maybe (Sized len t)
-sized = \t -> do
-  Dict <- le @(MinLength t) @len
-  Dict <- le @len @(MaxLength t)
-  withDict (leTrans @len @(MaxLength t) @MaxInt) $ do
-    tL <- I.from (I.toInt (length t))
-    guard (tL == lengthN @(Sized len t))
-    pure (Sized t)
+sized t = I.with (length t) $ \p -> do
+  Refl <- sameNat (Proxy @len) p
+  pure (Sized t)
 
 -- | Wrap the @t@ in a 'Sized' if it has the correct length,
 -- otherwise fail with 'error'.
@@ -926,14 +1007,13 @@ withSizedMinMax
        => Sized len t
        -> a )
   -> Maybe a
-withSizedMinMax t g = do
-  SomeNat (_ :: Proxy len) <- pure $ someNatVal $ I.toNatural (length t)
+withSizedMinMax t g = I.with (length t) $ \(Proxy @len) -> do
   Dict <- le @min @len
   Dict <- le @len @max
-  Dict <- le @(MinLength t) @len
-  Dict <- le @len @(MaxLength t)
-  withDict (leTrans @len @(MaxLength t) @MaxInt) $
-    pure $ g (Sized t :: Sized len t)
+  withDict (zeroLe @len) $
+    withDict (leTrans @len @(MaxLength t) @(KI.Abs (I.MaxT Int))) $
+      withDict (leTrans @len @(KI.Abs (I.MaxT Int)) @(I.MaxT CSize)) $
+        pure $ g (Sized t :: Sized len t)
 
 -- | Wrap the @t@ in a 'Sized' of length known to be within @min@ and @max@.
 withSizedMinMaxN
@@ -951,15 +1031,18 @@ withSizedMinMaxN
        => Sized len t
        -> a )
   -> a
-withSizedMinMaxN t
-  = I.with (length t) $ \(_ :: Proxy len) _ ->
-      withDict (leTrans @min @(MinLength t) @len) $
-      withDict (leTrans @len @(MaxLength t) @max) $
-      withDict (leTrans @len @(MaxLength t) @MaxInt) $ \f ->
-      f (Sized t :: Sized len t)
+withSizedMinMaxN t f =
+  I.with (length t) $ \(_ :: Proxy len) ->
+  withDict (zeroLe @len) $
+  withDict (leTrans @min @(MinLength t) @len) $
+  withDict (leTrans @len @(MaxLength t) @max) $
+  withDict (leTrans @len @(MaxLength t) @(KI.Abs (I.MaxT Int))) $
+  withDict (leTrans @len @(KI.Abs (I.MaxT Int)) @(I.MaxT CSize)) $
+  f (Sized t :: Sized len t)
 
 --------------------------------------------------------------------------------
 
+-- | The size in bytes of a value of type @a@. As in 'sizeOf'.
 type family Size (a :: Type) :: Natural
 
 type instance Size Word8  = 1
@@ -970,18 +1053,13 @@ type instance Size Int8   = 1
 type instance Size Int16  = 2
 type instance Size Int32  = 4
 type instance Size Int64  = 8
--- | This value is machine-dependent.
 type instance Size CSize = Size Word
 
 #if WORD_SIZE_IN_BITS == 64
--- | This value is machine-dependent.
 type instance Size Int  = Size Int64
--- | This value is machine-dependent.
 type instance Size Word = Size Word64
 #elif WORD_SIZE_IN_BITS == 32
--- | This value is machine-dependent.
 type instance Size Int  = Size Int32
--- | This value is machine-dependent.
 type instance Size Word = Size Word32
 #else
 # error "Unexpected WORD_SIZE_IN_BYTES"
@@ -991,7 +1069,7 @@ type instance Size Word = Size Word32
 
 -- | Conversion between host byte encoding and Little-Endian or
 -- Big-Endian byte encoding.
-class (KnownNat (Size a), Size a <= MaxInt) => Endian a where
+class (KnownNat (Size a), Size a <= KI.Abs (I.MaxT Int)) => Endian a where
   {-# MINIMAL hToLE, hToBE, leToH, beToH #-}
   -- | From host encoding to Little-Endian encoding.
   hToLE :: a -> Tagged "LE" a
@@ -1151,7 +1229,9 @@ htole64 = id
 le64toh = id
 #endif
 
+
 --------------------------------------------------------------------------------
+
 -- | @'padLeftN' w a@ extends @a@ with zero or more @w@s on its left.
 -- Returns a copy.
 padLeftN
@@ -1164,9 +1244,7 @@ padLeftN
   -> a
   -> b
 padLeftN w a = do
-  let bL = lengthN @b
-      aL = length a
-      dLi = I.toInt bL - I.toInt aL -- positive because (aL <= bL)
+  let dLi = iToInt (lengthN @b) - iToInt (length a) -- positive: len a <= len b
   unsafeAllocN_ $ \bP -> do
     c_memset bP w (fromIntegral dLi)
     poke a (plusPtr bP dLi)
@@ -1184,20 +1262,18 @@ padRightN
   -> b
 padRightN w a = do
   let aL = length a
-      bL = lengthN @b
-      dLi = I.toInt bL - I.toInt aL -- positive because (aL <= bL)
+      dLi = iToInt (lengthN @b) - iToInt aL -- positive: aL <= len b
   unsafeAllocN_ $ \bP -> do
     poke a bP
-    c_memset (plusPtr bP (I.toInt aL)) w (fromIntegral dLi)
+    c_memset (plusPtr bP (iToInt aL)) w (fromIntegral dLi)
 
 --------------------------------------------------------------------------------
 
 instance GetLength B.ByteString where
   type MinLength B.ByteString = 0
-  type MaxLength B.ByteString = MaxInt
-  length = fromMaybe (error "By.lenght: unexpected ByteString length")
-         . I.from
-         . B.length
+  type MaxLength B.ByteString = KI.Abs (I.MaxT Int)
+  length x = fromMaybe (error "By.lenght: unexpected ByteString length") $
+               I.from =<< toIntegralSized (B.length x)
 
 
 instance Copy B.ByteString
@@ -1209,7 +1285,7 @@ instance Read B.ByteString where
 
 instance Alloc B.ByteString where
   alloc len g = do
-    let len' = I.toInt len
+    let len' = iToInt len
     fp <- BI.mallocByteString len'
     a <- withForeignPtr fp (g . castPtr)
     pure (BI.fromForeignPtr fp 0 len', a)
@@ -1246,12 +1322,12 @@ type family NoSuchInstance where
       'GHC.Text "instead of Prelude.show." )
 
 -- | Provided only as a convenience. If the 'Byets' to concatenate
--- add up to more than 'MaxInt', this 'error's. Notice that this is
+-- add up to more than @'I.MaxBound' 'Int'@, this 'error's. Notice that this is
 -- true of types like 'B.ByteString', too. Use 'concat' if you are
 -- paranoid.
 instance Semigroup Byets where
-  a <> b | length a == I.known @0 = b
-         | length b == I.known @0 = a
+  a <> b | iToCSize (length a) == 0 = b
+         | iToCSize (length b) == 0 = a
          | otherwise = fromMaybe (error "By.Byets.(<>): too long") (append a b)
 
 -- | See the 'Semigroup' instance for 'Byets'.
@@ -1263,7 +1339,6 @@ instance Monoid Byets where
   mconcat []  = mempty
   mconcat [a] = a
   mconcat as  = fromMaybe (error "By.Byets.mconcat: too long") (concat as)
-
 
 -- | Provided only as a convenience. While the allocated 'Byets' will be
 -- zeroed once they become unreachable, the input to 'fromString' may not.
@@ -1278,8 +1353,8 @@ instance IsString Byets where
 instance Eq Byets where
   {-# NOINLINE (==) #-}
   a == b = unsafeDupablePerformIO $ do
-    let aL = itoCSize (length a)
-        bL = itoCSize (length b)
+    let aL = iToCSize (length a)
+        bL = iToCSize (length b)
     read a $ \pa -> read b $ \pb ->
       pure $ if aL == bL
         then c_by_memeql_ct pa pb aL
@@ -1290,8 +1365,8 @@ instance Eq Byets where
 instance Ord Byets where
   {-# NOINLINE compare #-}
   compare a b = unsafeDupablePerformIO $ do
-    let aL = itoCSize (length a)
-        bL = itoCSize (length b)
+    let aL = iToCSize (length a)
+        bL = iToCSize (length b)
     read a $ \pa -> read b $ \pb ->
       pure $ if aL == bL
         then compare (c_by_memcmp_be_ct pa pb aL) 0
@@ -1306,7 +1381,7 @@ instance {-# OVERLAPS #-} Read (Sized len Byets)
   a == b = unsafeDupablePerformIO $
     read a $ \pa ->
     read b $ \pb ->
-    pure $ c_by_memeql_ct pa pb (itoCSize (length a))
+    pure $ c_by_memeql_ct pa pb (iToCSize (length a))
 
 -- | __Constant time__. A bit more efficient than the default instance.
 instance {-# OVERLAPS #-} Read (Sized len Byets)
@@ -1315,11 +1390,11 @@ instance {-# OVERLAPS #-} Read (Sized len Byets)
   compare a b = unsafeDupablePerformIO $
     read a $ \pa ->
     read b $ \pb ->
-    pure $ compare (c_by_memcmp_be_ct pa pb (itoCSize (length a))) 0
+    pure $ compare (c_by_memcmp_be_ct pa pb (iToCSize (length a))) 0
 
 instance GetLength Byets where
   type MinLength Byets = 0
-  type MaxLength Byets = MaxInt
+  type MaxLength Byets = KI.Abs (I.MaxT Int)
   length (Byets len _) = len
 
 instance Copy Byets
@@ -1331,7 +1406,7 @@ instance Read Byets where
 -- unreachable.
 instance Alloc Byets where
   alloc len g = do
-    fp <- Memzero.mallocForeignPtrBytes (I.toInt len)
+    fp <- Memzero.mallocForeignPtrBytes (iToInt len)
     a <- withForeignPtr fp g
     pure (Byets len fp, a)
 
@@ -1343,10 +1418,10 @@ toBase16 :: (Read a, Alloc b)
          -> a
          -> Maybe b
 toBase16 u = \bin -> do
-    b16L <- I.from (2 * I.toInteger (length bin))
+    b16L <- I.from =<< toIntegralSized (2 * iToInteger (length bin))
     pure $ unsafeAlloc_ b16L $ \b16P ->
            read bin $ \binP ->
-           f b16P binP (itoCSize (length bin))
+           f b16P binP (iToCSize (length bin))
   where
     f = if u then c_by_to_base16_upper
              else c_by_to_base16_lower
@@ -1409,12 +1484,12 @@ toBase16N u = fromMaybe (error "By.toBase16N: impossible") . toBase16 u
 fromBase16 :: forall a b. (Read a, Alloc b) => a -> Maybe b
 fromBase16 b16 = do
   let b16L = length b16
-  binL <- case divMod (I.toInt b16L) 2 of
+  binL <- case divMod (iToCSize b16L) 2 of
             (d, 0) -> I.from d
             _      -> Nothing
   let (bin, ret) = unsafeAlloc binL $ \binP ->
                    read b16 $ \b16P ->
-                   c_by_from_base16 binP (itoCSize binL) b16P
+                   c_by_from_base16 binP (iToCSize binL) b16P
   guard (ret == 0)
   Just bin
 
@@ -1476,10 +1551,18 @@ foreign import ccall unsafe "by.h by_from_base16"
     -> Ptr Word8 -- ^ base16
     -> IO CInt
 
---------------------------------------------------------------------------------
+--------------------------------------------------------------------------
 
-itoCSize :: forall l r. (r <= I.MaxInt) => Interval l r -> CSize
-itoCSize = fromIntegral . I.toNatural
+iToCSize :: forall l r. I CSize l r -> CSize
+iToCSize = I.unwrap
+
+iToInt :: forall l r. (r <= KI.Abs (I.MaxT Int)) => I CSize l r -> Int
+iToInt = fromIntegral . iToCSize
+
+iToInteger :: forall l r. I CSize l r -> Int
+iToInteger = fromIntegral . iToCSize
+
+--------------------------------------------------------------------------------
 
 le :: forall l r
    .  (KnownNat l, KnownNat r)
@@ -1492,3 +1575,4 @@ le = case cmpNat (Proxy @l) (Proxy @r) of
 minusLe :: forall (a :: Nat) (b :: Nat) (c :: Nat)
         .  (a <= c, b <= c, b <= a) :- ((a - b) <= c)
 minusLe = unsafeCoerceConstraint
+
