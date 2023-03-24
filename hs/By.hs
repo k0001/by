@@ -13,8 +13,6 @@ module By {--}
   , first
   , last
   , null
-
-    -- ** Known
   , KnownLength(..)
   , lengthN
 
@@ -32,7 +30,6 @@ module By {--}
   , Copy (..)
   , pokeFrom
   , pokeTo
-    -- ** Helpers
   , mkPoke
   , mkPokeFromTo
 
@@ -217,8 +214,11 @@ class
   , I.Interval CSize (MinLength t) (MaxLength t)
   , I.Interval CSize 0 (MaxLength t)
   ) => GetLength t where
+  -- | Minimum possible byte length.
   type MinLength (t :: Type) :: Natural
+  -- | Maximum possible byte length.
   type MaxLength (t :: Type) :: Natural
+  -- | Runtime byte length discovery.
   length :: t -> LengthInterval t
   default length :: KnownLength t => t -> LengthInterval t
   length (_ :: t) = lengthN @t
