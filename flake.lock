@@ -81,11 +81,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1679731184,
-        "narHash": "sha256-GlnVJ8PoUDYHH15xnF6hhOlcoVQvNBaFtJ/xRrCFZ48=",
+        "lastModified": 1679735356,
+        "narHash": "sha256-gheAlTid13EL7hdPhcuhp4gkRS6FuWTM8I6m725PKg0=",
         "owner": "k0001",
         "repo": "hs-i",
-        "rev": "8c83f89db04b803b9a39eaa78750ff284003cd1d",
+        "rev": "8b96f70c327d0a931e9e353b22cd87a1f2343230",
         "type": "github"
       },
       "original": {
