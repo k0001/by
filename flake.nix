@@ -2,79 +2,56 @@
   description = "Haskell 'by' library";
 
   inputs = {
-    memzero = {
-      url = "github:k0001/hs-memzero";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    i = {
-      url = "github:k0001/hs-i";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    nixpkgs.url =
+      "github:NixOS/nixpkgs?rev=21eda9bc80bef824a037582b1e5a43ba74e92daa";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    hs_i.url = "github:k0001/hs-i";
+    hs_i.inputs.nixpkgs.follows = "nixpkgs";
+    hs_memzero.url = "github:k0001/hs-memzero";
+    hs_memzero.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, memzero, i }:
-    let
-      inherit (nixpkgs) lib;
-      hs_by = import ./.;
-      hspkgsOverrides = pself: psuper: hself: hsuper: {
-        by = hsuper.callPackage hs_by { };
-      };
-      pkgsOverlay = lib.composeExtensions
-        (lib.composeExtensions i.pkgsOverlay memzero.pkgsOverlay)
-        (pself: psuper: {
-          haskell = psuper.haskell // {
-            packageOverrides = lib.composeExtensions
-              (lib.composeExtensions (i.hspkgsOverrides pself psuper)
-                (memzero.hspkgsOverrides pself psuper))
-              (hspkgsOverrides pself psuper);
-          };
-        });
-      pkgsFor = system:
-        import nixpkgs {
+  outputs = inputs@{ ... }:
+    inputs.flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.flake-parts.flakeModules.easyOverlay ];
+      systems = [ "x86_64-linux" "i686-linux" "aarch64-linux" ];
+      perSystem = { config, pkgs, final, system, ... }: {
+        _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
-          overlays = [ pkgsOverlay ];
+          overlays = [
+            inputs.hs_memzero.overlays.default
+            inputs.hs_i.overlays.default
+
+            # Why is this necessary? Shouldn't hs_i bring it?
+            inputs.hs_i.inputs.hs_kind.overlays.default
+          ];
         };
-
-    in {
-      inherit hs_by hspkgsOverrides pkgsOverlay;
-      packages = lib.genAttrs [ "x86_64-linux" "i686-linux" "aarch64-linux" ]
-        (system:
-          let pkgs = pkgsFor system;
-          in {
-            default = pkgs.releaseTools.aggregate {
-              name = "every output from this flake";
-              constituents = let
-                p = self.packages.${system};
-                s = self.devShells.${system};
-              in [
-                # p.hs_by__ghcDefault
-                p.hs_by__ghc943
-
-                # p.hs_by__ghcDefault.doc
-                p.hs_by__ghc943.doc
-
-                # s.hs_by__ghcDefault
-                s.hs_by__ghc943
-              ];
-            };
-            #hs_by__ghcDefault = pkgs.haskellPackages.by;
-            hs_by__ghc943 = pkgs.haskell.packages.ghc943.by;
-          });
-      devShells = lib.genAttrs [ "x86_64-linux" "i686-linux" "aarch64-linux" ]
-        (system:
-          let
-            pkgs = pkgsFor system;
-            mkShellFor = hpkgs:
-              hpkgs.shellFor {
-                packages = p: [ p.by ];
-                withHoogle = true;
-                nativeBuildInputs = [ pkgs.cabal-install pkgs.cabal2nix ];
-              };
-          in {
-            default = self.devShells.${system}.hs_by__ghc943;
-            #hs_by__ghcDefault = mkShellFor pkgs.haskellPackages;
-            hs_by__ghc943 = mkShellFor pkgs.haskell.packages.ghc943;
-          });
+        overlayAttrs = {
+          haskell = pkgs.haskell // {
+            packageOverrides = pkgs.lib.composeExtensions
+              (pkgs.haskell.packageOverrides or (_: _: { }))
+              (hself: hsuper: { by = hself.callPackage ./. { }; });
+          };
+        };
+        packages = {
+          by__ghc943 = final.pkgs.haskell.packages.ghc943.by;
+          default = pkgs.releaseTools.aggregate {
+            name = "every output from this flake";
+            constituents = [
+              config.packages.by__ghc943
+              config.packages.by__ghc943.doc
+              config.devShells.ghc943
+            ];
+          };
+        };
+        devShells = {
+          default = config.devShells.ghc943;
+          ghc943 = final.pkgs.haskell.packages.ghc943.shellFor {
+            packages = p: [ p.by ];
+            withHoogle = true;
+            nativeBuildInputs = [ pkgs.cabal-install pkgs.cabal2nix ];
+          };
+        };
+      };
     };
-
 }
